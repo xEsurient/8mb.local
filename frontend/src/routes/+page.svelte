@@ -1,7 +1,7 @@
 <script lang="ts">
   import '../app.css';
-  import { onMount } from 'svelte';
-  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion } from '$lib/api';
+  import { onMount, onDestroy } from 'svelte';
+  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
@@ -60,6 +60,14 @@
     // Try plain number (seconds)
     const num = parseFloat(str);
     return isNaN(num) ? null : num;
+  }
+
+  function parseExplicitHeight(value: string): 2160|1440|1080|720|480|360|240|null {
+    const parsed = Number(value);
+    if (parsed === 2160 || parsed === 1440 || parsed === 1080 || parsed === 720 || parsed === 480 || parsed === 360 || parsed === 240) {
+      return parsed;
+    }
+    return null;
   }
 
   // Calculate effective duration based on trim settings
@@ -203,6 +211,12 @@
   // Recent history
   let history: any[] = [];
   let historyEnabled = false;
+  // Batch progress tracker (shared with /batch page)
+  const ACTIVE_BATCH_KEY = 'activeBatchId';
+  let activeBatchId: string | null = null;
+  let activeBatchStatus: any = null;
+  let activeBatchError: string | null = null;
+  let activeBatchPoller: any = null;
 
   // Load default presets and available codecs on mount
   onMount(async () => {
@@ -291,6 +305,15 @@
         const data = await res.json();
         historyEnabled = !!data.enabled;
         history = (data.entries || []).slice(0,5);
+      }
+    } catch {}
+
+    // Restore the currently tracked batch from the batch page
+    try {
+      const tracked = localStorage.getItem(ACTIVE_BATCH_KEY);
+      if (tracked) {
+        activeBatchId = tracked;
+        await refreshActiveBatchStatus();
       }
     } catch {}
   });
@@ -434,6 +457,54 @@
     if (mb < 1024) return `${mb.toFixed(2)} MB`;
     const gb = mb / 1024;
     return `${gb.toFixed(2)} GB`;
+  }
+
+  function formatBatchState(state?: string): string {
+    if (!state) return 'Unknown';
+    if (state === 'completed_with_errors') return 'Completed with errors';
+    return state.charAt(0).toUpperCase() + state.slice(1);
+  }
+
+  function isBatchTerminal(state?: string): boolean {
+    return state === 'completed' || state === 'completed_with_errors' || state === 'failed';
+  }
+
+  function stopActiveBatchPolling() {
+    if (activeBatchPoller) {
+      clearInterval(activeBatchPoller);
+      activeBatchPoller = null;
+    }
+  }
+
+  function clearActiveBatchTracker() {
+    activeBatchId = null;
+    activeBatchStatus = null;
+    activeBatchError = null;
+    stopActiveBatchPolling();
+    try { localStorage.removeItem(ACTIVE_BATCH_KEY); } catch {}
+  }
+
+  async function refreshActiveBatchStatus(silent = false) {
+    if (!activeBatchId) return;
+    try {
+      const status = await getBatchStatus(activeBatchId);
+      activeBatchStatus = status;
+      activeBatchError = null;
+      if (isBatchTerminal(status?.state)) {
+        stopActiveBatchPolling();
+      } else if (!activeBatchPoller) {
+        activeBatchPoller = setInterval(() => {
+          refreshActiveBatchStatus(true).catch(() => {});
+        }, 3000);
+      }
+    } catch (e: any) {
+      const msg = e?.message || 'Failed to load active batch status';
+      if (!silent) activeBatchError = msg;
+      const low = String(msg).toLowerCase();
+      if (low.includes('404') || low.includes('batch not found')) {
+        clearActiveBatchTracker();
+      }
+    }
   }
 
   function formatEta(sec: number): string {
@@ -936,6 +1007,10 @@
     }
   }
 
+  onDestroy(() => {
+    stopActiveBatchPolling();
+  });
+
   // Persist UI preferences
   $: (() => { try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {} })();
   $: (() => { try { localStorage.setItem('autoDownload', String(autoDownload)); } catch {} })();
@@ -946,6 +1021,9 @@
   <div class="flex items-center justify-between mb-4">
     <h1 class="text-2xl font-bold">8mb.local {#if appVersion}<span class="align-middle text-xs ml-2 px-2 py-0.5 rounded border border-gray-700 text-gray-400">v{appVersion}</span>{/if}</h1>
     <div class="flex gap-2">
+      <a href="/batch" class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors text-sm">
+        🗂 Batch
+      </a>
       <a href="/queue" class="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded-lg transition-colors text-sm">
         📋 Queue
       </a>
@@ -954,6 +1032,47 @@
       </a>
     </div>
   </div>
+
+  {#if activeBatchId}
+    <div class="card border border-emerald-700/40">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <div>
+          <h3 class="font-semibold">Batch Tracker</h3>
+          <p class="text-xs text-gray-400">Batch ID: {activeBatchId}</p>
+        </div>
+        <div class="flex gap-2">
+          <a href="/batch" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-sm">Open</a>
+          {#if activeBatchStatus?.completed_count > 0}
+            <a href={batchZipDownloadUrl(activeBatchId)} class="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded text-sm">ZIP</a>
+          {/if}
+          <button class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm" on:click={() => refreshActiveBatchStatus(false)}>Refresh</button>
+          <button class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded text-sm" on:click={clearActiveBatchTracker}>Clear</button>
+        </div>
+      </div>
+
+      {#if activeBatchStatus}
+        <div class="mt-3">
+          <div class="flex items-center justify-between text-sm mb-1">
+            <span>{formatBatchState(activeBatchStatus.state)}</span>
+            <span>{Number(activeBatchStatus.overall_progress || 0).toFixed(1)}%</span>
+          </div>
+          <div class="h-2 bg-gray-800 rounded overflow-hidden">
+            <div class="h-2 bg-emerald-500" style={`width:${Math.max(0, Math.min(100, Number(activeBatchStatus.overall_progress || 0)))}%`}></div>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs mt-2">
+            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Queued: {activeBatchStatus.queued_count}</div>
+            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Running: {activeBatchStatus.running_count}</div>
+            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Done: {activeBatchStatus.completed_count}</div>
+            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Failed: {activeBatchStatus.failed_count}</div>
+          </div>
+        </div>
+      {:else if activeBatchError}
+        <p class="text-sm text-amber-300 mt-2">{activeBatchError}</p>
+      {:else}
+        <p class="text-sm opacity-70 mt-2">Loading active batch status…</p>
+      {/if}
+    </div>
+  {/if}
 
   <!-- System capabilities -->
   <div class="card">
@@ -1119,7 +1238,7 @@
       <label class="block mb-1 text-sm">Resolution</label>
       <div class="flex items-center gap-2">
         <select class="input w-full" disabled={audioOnly || autoResolution}
-          on:change={(e:any)=>{ const v = e.target.value; explicitHeight = v? parseInt(v): null; }}>
+          on:change={(e:any)=>{ const v = e.target.value; explicitHeight = parseExplicitHeight(v); }}>
           <option value="">Original</option>
           <option value="2160">2160p (4K)</option>
           <option value="1440">1440p</option>

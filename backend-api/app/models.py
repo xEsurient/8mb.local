@@ -155,3 +155,38 @@ class QueueStatusResponse(BaseModel):
     queued_count: int
     running_count: int
     completed_count: int  # Recently completed (last hour)
+
+
+# Batch processing models
+class BatchItemStatus(BaseModel):
+    index: int
+    job_id: str
+    task_id: str
+    original_filename: str
+    stored_filename: str
+    output_filename: str
+    state: Literal['queued', 'running', 'completed', 'failed', 'canceled'] = 'queued'
+    progress: float = 0.0
+    error: Optional[str] = None
+    output_path: Optional[str] = None
+    download_url: str
+
+
+class BatchCreateResponse(BaseModel):
+    batch_id: str
+    item_count: int
+    state: Literal['queued', 'running', 'completed', 'completed_with_errors', 'failed'] = 'queued'
+    items: list[BatchItemStatus]
+
+
+class BatchStatusResponse(BaseModel):
+    batch_id: str
+    state: Literal['queued', 'running', 'completed', 'completed_with_errors', 'failed'] = 'queued'
+    item_count: int
+    queued_count: int
+    running_count: int
+    completed_count: int
+    failed_count: int
+    overall_progress: float
+    items: list[BatchItemStatus]
+    zip_download_url: Optional[str] = None

@@ -196,14 +196,32 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
     Returns (success: bool, message: str)
     """
     try:
-        # Test encoding directly without hardware decode
-        cmd = ["ffmpeg", "-hide_banner"]
+        # Test encoding directly without hardware decode. Some QSV builds are
+        # more stable with explicit -qsv_device, while others work best without
+        # any extra init flags, so try both when needed.
+        common_args = [
+            "-f",
+            "lavfi",
+            "-i",
+            "color=black:s=256x256:d=0.1",
+            "-c:v",
+            encoder_name,
+            "-t",
+            "0.1",
+            "-frames:v",
+            "3",  # Encode a few frames to be sure
+            "-f",
+            "null",
+            "-",
+        ]
 
-        # For VAAPI encoders, we need hardware init flags and upload filter
+        cmd_variants: List[List[str]] = []
         if encoder_name.endswith("_vaapi") and hw_flags:
-            cmd.extend(hw_flags)
-            cmd.extend(
+            cmd_variants.append(
                 [
+                    "ffmpeg",
+                    "-hide_banner",
+                    *hw_flags,
                     "-f",
                     "lavfi",
                     "-i",
@@ -221,28 +239,24 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
                     "-",
                 ]
             )
+        elif encoder_name.endswith("_qsv"):
+            if hw_flags:
+                cmd_variants.append(["ffmpeg", "-hide_banner", *hw_flags, *common_args])
+            cmd_variants.append(["ffmpeg", "-hide_banner", *common_args])
         else:
-            # For other encoders (NVENC, QSV, CPU), test without hw_flags
-            cmd.extend(
-                [
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "color=black:s=256x256:d=0.1",
-                    "-c:v",
-                    encoder_name,
-                    "-t",
-                    "0.1",
-                    "-frames:v",
-                    "3",  # Encode a few frames to be sure
-                    "-f",
-                    "null",
-                    "-",
-                ]
+            cmd_variants.append(["ffmpeg", "-hide_banner", *common_args])
+
+        result = None
+        for cmd in cmd_variants:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=8, env=get_gpu_env()
             )
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=5, env=get_gpu_env()
-        )
+            if result.returncode == 0:
+                break
+
+        if result is None:
+            return False, "Encode did not execute"
+
         stderr_lower = result.stderr.lower()
 
         # CPU encoders: "Operation not permitted" is often a Docker seccomp issue, not encoder failure

@@ -55,6 +55,92 @@ export function uploadWithProgress(
   });
 }
 
+export type BatchUploadPayload = {
+  target_size_mb: number;
+  video_codec: string;
+  audio_codec: string;
+  audio_bitrate_kbps: number;
+  preset: string;
+  container: 'mp4' | 'mkv';
+  tune: string;
+  max_width?: number | null;
+  max_height?: number | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  force_hw_decode?: boolean;
+  fast_mp4_finalize?: boolean;
+  auto_resolution?: boolean;
+  min_auto_resolution?: number;
+  target_resolution?: number | null;
+  audio_only?: boolean;
+};
+
+export function uploadBatchWithProgress(
+  files: File[],
+  payload: BatchUploadPayload,
+  opts?: { auth?: { user: string; pass: string }; onProgress?: (percent: number, loadedBytes: number, totalBytes: number) => void }
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!files || files.length === 0) {
+      reject(new Error('No files provided for batch upload'));
+      return;
+    }
+
+    const fd = new FormData();
+    for (const file of files) {
+      fd.append('files', file, file.name);
+    }
+
+    const appendMaybe = (key: string, value: unknown) => {
+      if (value === undefined || value === null || value === '') return;
+      fd.append(key, String(value));
+    };
+
+    appendMaybe('target_size_mb', payload.target_size_mb);
+    appendMaybe('video_codec', payload.video_codec);
+    appendMaybe('audio_codec', payload.audio_codec);
+    appendMaybe('audio_bitrate_kbps', payload.audio_bitrate_kbps);
+    appendMaybe('preset', payload.preset);
+    appendMaybe('container', payload.container);
+    appendMaybe('tune', payload.tune);
+    appendMaybe('max_width', payload.max_width);
+    appendMaybe('max_height', payload.max_height);
+    appendMaybe('start_time', payload.start_time);
+    appendMaybe('end_time', payload.end_time);
+    appendMaybe('force_hw_decode', payload.force_hw_decode);
+    appendMaybe('fast_mp4_finalize', payload.fast_mp4_finalize);
+    appendMaybe('auto_resolution', payload.auto_resolution);
+    appendMaybe('min_auto_resolution', payload.min_auto_resolution);
+    appendMaybe('target_resolution', payload.target_resolution);
+    appendMaybe('audio_only', payload.audio_only);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${BACKEND}/api/batches/upload`);
+    if (opts?.auth) {
+      xhr.setRequestHeader('Authorization', 'Basic ' + btoa(`${opts.auth.user}:${opts.auth.pass}`));
+    }
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && opts?.onProgress) {
+        const pct = Math.max(0, Math.min(100, Math.round((e.loaded / e.total) * 100)));
+        opts.onProgress(pct, e.loaded, e.total);
+      }
+    };
+    xhr.onload = () => {
+      try {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText || '{}'));
+        } else {
+          reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+        }
+      } catch (err: any) {
+        reject(err);
+      }
+    };
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.send(fd);
+  });
+}
+
 export async function startCompress(payload: any, auth?: {user: string, pass: string}) {
   const headers: Record<string,string> = { 'Content-Type': 'application/json' };
   if (auth) headers['Authorization'] = 'Basic ' + btoa(`${auth.user}:${auth.pass}`);
@@ -94,6 +180,18 @@ export function openProgressStream(taskId: string, auth?: {user: string, pass: s
 
 export function downloadUrl(taskId: string) {
   return `${BACKEND}/api/jobs/${taskId}/download`;
+}
+
+export function batchZipDownloadUrl(batchId: string) {
+  return `${BACKEND}/api/batches/${encodeURIComponent(batchId)}/download.zip`;
+}
+
+export async function getBatchStatus(batchId: string, auth?: {user: string, pass: string}) {
+  const headers: Record<string, string> = {};
+  if (auth) headers['Authorization'] = 'Basic ' + btoa(`${auth.user}:${auth.pass}`);
+  const res = await fetch(`${BACKEND}/api/batches/${encodeURIComponent(batchId)}/status`, { headers });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 export async function cancelJob(taskId: string) {

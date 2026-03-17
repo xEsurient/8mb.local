@@ -8,6 +8,37 @@ from typing import Any, Dict, Optional
 _HW_CACHE: Optional[Dict] = None
 
 
+def _first_render_node(preferred: Optional[str] = None) -> Optional[str]:
+    """Return the first available /dev/dri render node, if any."""
+    if preferred and os.path.exists(preferred):
+        return preferred
+    try:
+        import glob
+
+        render_nodes = sorted(glob.glob("/dev/dri/renderD*"))
+        if render_nodes:
+            return render_nodes[0]
+    except Exception:
+        pass
+    return None
+
+
+def _build_qsv_init_flags(hw_info: Optional[Dict[str, Any]] = None) -> list[str]:
+    """
+    Build stable QSV init flags.
+
+    Prefer -qsv_device on Linux render nodes for broader ffmpeg compatibility,
+    and avoid forcing QSV decode by default (encode-only is more reliable).
+    """
+    preferred = None
+    if hw_info:
+        preferred = hw_info.get("qsv_device") or hw_info.get("vaapi_device")
+    render_node = _first_render_node(preferred)
+    if render_node:
+        return ["-qsv_device", render_node]
+    return []
+
+
 def detect_hw_accel() -> Dict[str, Any]:
     """
     Detect available hardware acceleration.
@@ -20,6 +51,7 @@ def detect_hw_accel() -> Dict[str, Any]:
         "decode_method": None,
         "upload_method": None,
         "vaapi_device": None,
+        "qsv_device": None,
     }
 
     # Check for NVIDIA first (NVENC/NVDEC)
@@ -43,10 +75,13 @@ def detect_hw_accel() -> Dict[str, Any]:
     vaapi_info = _check_vaapi()
 
     if qsv_available:
+        qsv_device = _first_render_node(vaapi_info.get("device"))
         result.update(
             {
                 "type": "intel",
                 "decode_method": "qsv",
+                "qsv_device": qsv_device,
+                "vaapi_device": qsv_device,
                 "available_encoders": {
                     "h264": "h264_qsv",
                     "hevc": "hevc_qsv",
@@ -139,17 +174,12 @@ def _check_intel_qsv() -> bool:
       to Linux containers, so QSV should be considered unavailable to avoid confusing
       initialization errors (e.g., "Function not implemented").
     """
-    # Require a DRI render node to be present
-    try:
-        import glob
+    # Require a DRI render node to be present. On WSL2 and non-DRI environments,
+    # QSV cannot initialize reliably in Linux containers.
+    render_node = _first_render_node()
+    if not render_node:
+        return False
 
-        render_nodes = glob.glob("/dev/dri/renderD*")
-        if not render_nodes:
-            # If this is WSL (or any env) without /dev/dri, QSV cannot work
-            return False
-    except Exception:
-        # If we can't check, proceed with ffmpeg probes below
-        pass
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-hwaccels"],
@@ -166,37 +196,78 @@ def _check_intel_qsv() -> bool:
                 timeout=2,
             )
             if "h264_qsv" in encoders.stdout:
-                # Test QSV initialization
-                try:
-                    test_result = subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-hide_banner",
-                            "-loglevel",
-                            "error",
-                            "-init_hw_device",
-                            "qsv=hw",
-                            "-f",
-                            "lavfi",
-                            "-i",
-                            "nullsrc=s=64x64:d=0.1",
-                            "-frames:v",
-                            "1",
-                            "-c:v",
-                            "h264_qsv",
-                            "-f",
-                            "null",
-                            "-",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    # QSV initialization succeeded only if return code is 0
-                    if test_result.returncode == 0:
-                        return True
-                except (FileNotFoundError, subprocess.TimeoutExpired):
-                    pass
+                # Test QSV initialization across common ffmpeg invocation patterns.
+                probe_cmds = [
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-qsv_device",
+                        render_node,
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "nullsrc=s=64x64:d=0.1",
+                        "-frames:v",
+                        "1",
+                        "-c:v",
+                        "h264_qsv",
+                        "-f",
+                        "null",
+                        "-",
+                    ],
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "nullsrc=s=64x64:d=0.1",
+                        "-frames:v",
+                        "1",
+                        "-c:v",
+                        "h264_qsv",
+                        "-f",
+                        "null",
+                        "-",
+                    ],
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-init_hw_device",
+                        "qsv=hw",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "nullsrc=s=64x64:d=0.1",
+                        "-frames:v",
+                        "1",
+                        "-c:v",
+                        "h264_qsv",
+                        "-f",
+                        "null",
+                        "-",
+                    ],
+                ]
+
+                for cmd in probe_cmds:
+                    try:
+                        test_result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=8,
+                        )
+                        if test_result.returncode == 0:
+                            return True
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
+                        continue
+
                 return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -365,14 +436,7 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
             elif "hevc" in encoder:
                 flags += ["-profile:v", "main"]
         elif encoder.endswith("_qsv"):
-            init_flags = [
-                "-init_hw_device",
-                "qsv=hw",
-                "-hwaccel",
-                "qsv",
-                "-hwaccel_output_format",
-                "qsv",
-            ]
+            init_flags = _build_qsv_init_flags(hw_info)
             flags = ["-pix_fmt", "nv12"]
             if "h264" in encoder:
                 flags += ["-profile:v", "high"]
@@ -415,14 +479,7 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
         elif base == "hevc":
             flags += ["-profile:v", "main"]
     elif encoder.endswith("_qsv"):
-        init_flags = [
-            "-init_hw_device",
-            "qsv=hw",
-            "-hwaccel",
-            "qsv",
-            "-hwaccel_output_format",
-            "qsv",
-        ]
+        init_flags = _build_qsv_init_flags(hw_info)
         flags = ["-pix_fmt", "nv12"]
         if base == "h264":
             flags += ["-profile:v", "high"]

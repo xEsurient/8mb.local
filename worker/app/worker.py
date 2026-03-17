@@ -800,6 +800,43 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         raise RuntimeError(msg)
 
     if rc != 0 and (actual_encoder.endswith("_nvenc") or actual_encoder.endswith("_qsv") or actual_encoder.endswith("_vaapi") or actual_encoder.endswith("_amf")):
+        # QSV compatibility retry: some ffmpeg builds fail when explicit QSV device
+        # flags are present but succeed when only the encoder is specified.
+        if actual_encoder.endswith("_qsv") and init_hw_flags:
+            _publish(self.request.id, {"type": "log", "message": f"⚠️ QSV encode failed (rc={rc}). Retrying with compatibility flags..."})
+            cmd_qsv_retry = [
+                "ffmpeg", "-hide_banner", "-y",
+                *input_opts,
+                "-i", input_path,
+                *duration_opts,
+                "-c:v", actual_encoder,
+                *v_flags,
+            ]
+            if vf_filters and not vaapi_with_filters:
+                cmd_qsv_retry += ["-vf", ",".join(vf_filters)]
+            cmd_qsv_retry += [
+                "-b:v", f"{int(video_kbps)}k",
+                "-maxrate", f"{maxrate}k",
+                "-bufsize", f"{bufsize}k",
+                *preset_flags,
+                *tune_flags,
+            ]
+            if chosen_audio_codec is None:
+                cmd_qsv_retry += ["-an"]
+            else:
+                cmd_qsv_retry += ["-c:a", chosen_audio_codec, "-b:a", a_bitrate_str]
+            cmd_qsv_retry += [*mp4_flags, "-progress", "pipe:2", output_path]
+
+            rc, was_cancelled = run_ffmpeg_and_stream(cmd_qsv_retry)
+            if was_cancelled:
+                _publish(self.request.id, {"type": "canceled"})
+                msg = "Job canceled by user"
+                _publish(self.request.id, {"type": "error", "message": msg})
+                raise RuntimeError(msg)
+            if rc == 0:
+                _publish(self.request.id, {"type": "log", "message": "QSV compatibility retry succeeded"})
+
+    if rc != 0 and (actual_encoder.endswith("_nvenc") or actual_encoder.endswith("_qsv") or actual_encoder.endswith("_vaapi") or actual_encoder.endswith("_amf")):
         _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode failed (rc={rc}). Retrying on CPU..."})
         _publish(self.request.id, {"type": "log", "message": (
             "Explanation: The hardware encoder failed at runtime. The worker will retry using a CPU encoder which is slower. "

@@ -8,11 +8,13 @@ import os
 import shutil
 import subprocess
 import uuid
+import zipfile
 from pathlib import Path
 from typing import AsyncGenerator
 
 import orjson
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from celery import chain
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +24,7 @@ import psutil
 from .auth import basic_auth
 from .config import settings
 from .celery_app import celery_app
-from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets, AvailableCodecsResponse, CodecVisibilitySettings, PresetProfile, PresetProfilesResponse, SetDefaultPresetRequest, SizeButtons, RetentionHours, JobMetadata, QueueStatusResponse
+from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets, AvailableCodecsResponse, CodecVisibilitySettings, PresetProfile, PresetProfilesResponse, SetDefaultPresetRequest, SizeButtons, RetentionHours, JobMetadata, QueueStatusResponse, BatchCreateResponse, BatchStatusResponse, BatchItemStatus
 from .cleanup import start_scheduler
 from . import settings_manager
 from . import history_manager
@@ -128,6 +130,70 @@ def _calc_bitrates(target_mb: float, duration_s: float, audio_kbps: int) -> tupl
     video_kbps = max(total_kbps - float(audio_kbps), 0.0)
     warn = video_kbps < 100
     return total_kbps, video_kbps, warn
+
+
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_MB", "51200")) * 1024 * 1024
+MAX_BATCH_FILES = int(os.getenv("MAX_BATCH_FILES", "200"))
+BATCH_TTL_SECONDS = int(os.getenv("BATCH_METADATA_TTL_HOURS", "24")) * 3600
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv",
+    ".mpeg", ".mpg", ".ts", ".m2ts", ".3gp", ".3g2", ".mts", ".mxf", ".ogv", ".vob",
+}
+
+
+def _safe_filename(filename: str | None) -> str:
+    if not filename:
+        return "upload.bin"
+    safe = Path(filename).name
+    return safe or "upload.bin"
+
+
+async def _save_upload_file(upload: UploadFile, destination: Path) -> None:
+    total_size = 0
+    with destination.open("wb") as out:
+        while chunk := await upload.read(8192):
+            total_size += len(chunk)
+            if total_size > MAX_UPLOAD_SIZE_BYTES:
+                destination.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large. Max size: {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB",
+                )
+            out.write(chunk)
+
+
+def _is_video_upload(upload: UploadFile) -> bool:
+    content_type = (upload.content_type or "").lower()
+    if content_type.startswith("video/"):
+        return True
+    ext = Path(_safe_filename(upload.filename)).suffix.lower()
+    return ext in VIDEO_EXTENSIONS
+
+
+def _build_output_name(input_path: Path, task_id: str, container: str, audio_only: bool = False) -> str:
+    ext = ".m4a" if audio_only else (".mp4" if container == "mp4" else ".mkv")
+    stem = input_path.stem
+    if len(stem) > 37 and stem[36] == '_':
+        stem = stem[37:]
+    return f"{stem}_8mblocal_{task_id[:8]}{ext}"
+
+
+async def _store_job_metadata(task_id: str, job_id: str, filename: str, target_size_mb: float, video_codec: str) -> None:
+    try:
+        job_meta = JobMetadata(
+            task_id=task_id,
+            job_id=job_id,
+            filename=filename,
+            target_size_mb=target_size_mb,
+            video_codec=video_codec,
+            state='queued',
+            progress=0.0,
+            created_at=time.time(),
+        )
+        await redis.setex(f"job:{task_id}", 86400, orjson.dumps(job_meta.dict()).decode())
+        await redis.zadd("jobs:active", {task_id: time.time()})
+    except Exception as e:
+        logger.warning(f"Failed to store job metadata for {task_id}: {e}")
 
 
 def _get_system_capabilities() -> dict:
@@ -330,21 +396,10 @@ async def _sync_codec_settings_from_tests(timeout_s: int = 60):
 
 @app.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(basic_auth)])
 async def upload(file: UploadFile = File(...), target_size_mb: float = 25.0, audio_bitrate_kbps: int = 128):
-    # File size limit to prevent OOM (default 50GB)
-    MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE_MB", "51200")) * 1024 * 1024
-    
     job_id = str(uuid.uuid4())
-    dest = UPLOADS_DIR / f"{job_id}_{file.filename}"
-    
-    # Save file with size check
-    total_size = 0
-    with dest.open("wb") as out:
-        while chunk := await file.read(8192):  # Read in chunks
-            total_size += len(chunk)
-            if total_size > MAX_FILE_SIZE:
-                dest.unlink(missing_ok=True)  # Clean up partial file
-                raise HTTPException(status_code=413, detail=f"File too large. Max size: {MAX_FILE_SIZE // (1024*1024)}MB")
-            out.write(chunk)
+    safe_name = _safe_filename(file.filename)
+    dest = UPLOADS_DIR / f"{job_id}_{safe_name}"
+    await _save_upload_file(file, dest)
     
     # ffprobe
     info = _ffprobe(dest)
@@ -389,28 +444,14 @@ async def startup_info():
 
 @app.post("/api/compress", dependencies=[Depends(basic_auth)])
 async def compress(req: CompressRequest):
-    input_path = UPLOADS_DIR / req.filename
+    input_path = UPLOADS_DIR / _safe_filename(req.filename)
     if not input_path.exists():
         raise HTTPException(status_code=404, detail="Input not found")
-    # Audio-only output selection (.m4a) overrides container
-    if req.audio_only:
-        ext = ".m4a"
-    else:
-        ext = ".mp4" if req.container == "mp4" else ".mkv"
-    # Strip job_id prefix from filename (UUID + underscore) to get original name
-    # e.g. "36f1e5e1-fe77-48ab-8e3c-f8061f670d9f_demo.mp4" -> "demo_8mblocal.mp4"
-    stem = input_path.stem
-    # Remove job_id prefix if present (36 char UUID + underscore = 37 chars)
-    if len(stem) > 37 and stem[36] == '_':
-        stem = stem[37:]
-    
+
     # Generate a unique task_id first
-    import uuid
     task_id = str(uuid.uuid4())
-    
-    # Use task_id in output filename to prevent concurrent jobs from overwriting each other
-    # Format: originalname_8mblocal_taskid.ext (e.g., "video_8mblocal_abc123.mp4")
-    output_name = f"{stem}_8mblocal_{task_id[:8]}{ext}"
+
+    output_name = _build_output_name(input_path, task_id, req.container, bool(req.audio_only or False))
     output_path = OUTPUTS_DIR / output_name
     
     task = celery_app.send_task(
@@ -444,25 +485,368 @@ async def compress(req: CompressRequest):
     except Exception:
         pass
     
-    # Store job metadata in Redis for queue tracking
-    try:
-        job_meta = JobMetadata(
-            task_id=task.id,
-            job_id=req.job_id,
-            filename=req.filename,
-            target_size_mb=req.target_size_mb,
-            video_codec=req.video_codec,
-            state='queued',
-            progress=0.0,
-            created_at=time.time()
-        )
-        await redis.setex(f"job:{task.id}", 86400, orjson.dumps(job_meta.dict()).decode())  # 24h TTL
-        # Add to active jobs set
-        await redis.zadd("jobs:active", {task.id: time.time()})
-    except Exception as e:
-        logger.warning(f"Failed to store job metadata: {e}")
+    await _store_job_metadata(task.id, req.job_id, req.filename, req.target_size_mb, req.video_codec)
     
     return {"task_id": task.id}
+
+
+async def _load_batch_payload(batch_id: str) -> dict:
+    raw = await redis.get(f"batch:{batch_id}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    try:
+        payload = orjson.loads(raw)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to decode batch metadata: {e}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Invalid batch metadata")
+    return payload
+
+
+async def _refresh_batch_payload(batch_payload: dict) -> dict:
+    items = batch_payload.get("items") or []
+    updated_items: list[dict] = []
+
+    queued_count = 0
+    running_count = 0
+    completed_count = 0
+    failed_count = 0
+    total_progress = 0.0
+    first_failed_index: int | None = None
+
+    for idx, item in enumerate(items):
+        task_id = str(item.get("task_id") or "")
+        state = str(item.get("state") or "queued")
+        progress = float(item.get("progress") or 0.0)
+        error = item.get("error")
+        output_path = item.get("output_path")
+
+        if task_id:
+            res = celery_app.AsyncResult(task_id)
+            celery_state = str(res.state or "PENDING")
+            meta = res.info if isinstance(res.info, dict) else {}
+
+            if celery_state == "PENDING":
+                if state not in ("completed", "failed", "canceled"):
+                    state = "queued"
+                    progress = 0.0
+            elif celery_state in ("STARTED", "PROGRESS"):
+                state = "running"
+                progress = float(meta.get("progress") or progress or 0.0)
+                error = None
+            elif celery_state == "SUCCESS":
+                state = "completed"
+                progress = 100.0
+                output_path = meta.get("output_path") or output_path
+                error = None
+            elif celery_state in ("FAILURE", "REVOKED"):
+                state = "failed" if celery_state == "FAILURE" else "canceled"
+                progress = 100.0
+                if not error:
+                    try:
+                        error = str(res.result) if res.result else "Compression failed"
+                    except Exception:
+                        error = "Compression failed"
+
+        progress = max(0.0, min(100.0, float(progress)))
+
+        if state == "queued":
+            queued_count += 1
+            total_progress += progress
+        elif state == "running":
+            running_count += 1
+            total_progress += progress
+        elif state == "completed":
+            completed_count += 1
+            total_progress += 100.0
+        else:
+            failed_count += 1
+            total_progress += 100.0
+            if first_failed_index is None:
+                first_failed_index = idx
+
+        updated_items.append({
+            **item,
+            "state": state,
+            "progress": progress,
+            "error": error,
+            "output_path": output_path,
+        })
+
+    # Celery chain stops on first failure; mark trailing queued entries as skipped.
+    if first_failed_index is not None:
+        for idx in range(first_failed_index + 1, len(updated_items)):
+            item = updated_items[idx]
+            if item.get("state") in ("queued", "running"):
+                prev_progress = float(item.get("progress") or 0.0)
+                if item.get("state") == "queued":
+                    queued_count -= 1
+                else:
+                    running_count -= 1
+                failed_count += 1
+                total_progress += (100.0 - prev_progress)
+                item["state"] = "failed"
+                item["progress"] = 100.0
+                item["error"] = item.get("error") or "Skipped because a previous batch item failed."
+                # Keep queue metadata in sync so skipped tasks don't appear as
+                # permanently queued in queue/status views.
+                task_id = str(item.get("task_id") or "")
+                if task_id:
+                    try:
+                        raw_job = await redis.get(f"job:{task_id}")
+                        if raw_job:
+                            job_meta = orjson.loads(raw_job)
+                            job_meta["state"] = "failed"
+                            job_meta["phase"] = "done"
+                            job_meta["progress"] = 100.0
+                            job_meta["completed_at"] = time.time()
+                            job_meta["error"] = item["error"]
+                            await redis.setex(f"job:{task_id}", 86400, orjson.dumps(job_meta).decode())
+                    except Exception:
+                        pass
+
+    item_count = len(updated_items)
+    if running_count > 0:
+        batch_state = "running"
+    elif item_count > 0 and completed_count == item_count:
+        batch_state = "completed"
+    elif item_count > 0 and failed_count == item_count:
+        batch_state = "failed"
+    elif item_count > 0 and (completed_count + failed_count) == item_count:
+        batch_state = "completed_with_errors"
+    else:
+        batch_state = "queued"
+
+    batch_payload["state"] = batch_state
+    batch_payload["queued_count"] = queued_count
+    batch_payload["running_count"] = running_count
+    batch_payload["completed_count"] = completed_count
+    batch_payload["failed_count"] = failed_count
+    batch_payload["overall_progress"] = round(total_progress / item_count, 2) if item_count else 0.0
+    batch_payload["items"] = updated_items
+
+    return batch_payload
+
+
+@app.post("/api/batches/upload", response_model=BatchCreateResponse, dependencies=[Depends(basic_auth)])
+async def upload_batch(
+    files: list[UploadFile] = File(...),
+    target_size_mb: float = Form(25.0),
+    video_codec: str = Form("av1_nvenc"),
+    audio_codec: str = Form("libopus"),
+    audio_bitrate_kbps: int = Form(128),
+    preset: str = Form("p6"),
+    container: str = Form("mp4"),
+    tune: str = Form("hq"),
+    max_width: int | None = Form(None),
+    max_height: int | None = Form(None),
+    start_time: str | None = Form(None),
+    end_time: str | None = Form(None),
+    force_hw_decode: bool = Form(False),
+    fast_mp4_finalize: bool = Form(False),
+    auto_resolution: bool = Form(False),
+    min_auto_resolution: int = Form(240),
+    target_resolution: int | None = Form(None),
+    audio_only: bool = Form(False),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(status_code=400, detail=f"Batch too large. Max files: {MAX_BATCH_FILES}")
+
+    accepted_files = [f for f in files if _is_video_upload(f)]
+    if not accepted_files:
+        raise HTTPException(status_code=400, detail="No video files found in upload")
+
+    batch_id = str(uuid.uuid4())
+    batch_items: list[dict] = []
+    signatures = []
+    saved_files: list[Path] = []
+
+    try:
+        for index, upload_file in enumerate(accepted_files):
+            original_filename = upload_file.filename or f"file_{index + 1}"
+            safe_name = _safe_filename(original_filename)
+
+            job_id = str(uuid.uuid4())
+            stored_filename = f"{job_id}_{safe_name}"
+            input_path = UPLOADS_DIR / stored_filename
+            await _save_upload_file(upload_file, input_path)
+            saved_files.append(input_path)
+
+            task_id = str(uuid.uuid4())
+            output_name = _build_output_name(input_path, task_id, container, bool(audio_only))
+            output_path = OUTPUTS_DIR / output_name
+
+            kwargs = dict(
+                job_id=job_id,
+                input_path=str(input_path),
+                output_path=str(output_path),
+                target_size_mb=target_size_mb,
+                video_codec=video_codec,
+                audio_codec=audio_codec,
+                audio_bitrate_kbps=audio_bitrate_kbps,
+                preset=preset,
+                tune=tune,
+                max_width=max_width,
+                max_height=max_height,
+                start_time=start_time,
+                end_time=end_time,
+                force_hw_decode=bool(force_hw_decode),
+                fast_mp4_finalize=bool(fast_mp4_finalize),
+                auto_resolution=bool(auto_resolution),
+                min_auto_resolution=min_auto_resolution,
+                target_resolution=target_resolution,
+                audio_only=bool(audio_only),
+            )
+
+            signatures.append(
+                celery_app.signature(
+                    "worker.worker.compress_video",
+                    kwargs=kwargs,
+                    immutable=True,
+                ).set(task_id=task_id)
+            )
+
+            item = {
+                "index": index,
+                "job_id": job_id,
+                "task_id": task_id,
+                "original_filename": original_filename,
+                "stored_filename": stored_filename,
+                "output_filename": output_name,
+                "output_path": str(output_path),
+                "state": "queued",
+                "progress": 0.0,
+                "error": None,
+                "download_url": f"/api/jobs/{task_id}/download",
+            }
+            batch_items.append(item)
+
+            await _store_job_metadata(task_id, job_id, stored_filename, target_size_mb, video_codec)
+
+            try:
+                await redis.publish(
+                    f"progress:{task_id}",
+                    orjson.dumps({"type": "log", "message": f"Batch queued ({index + 1}/{len(accepted_files)})"}).decode(),
+                )
+            except Exception:
+                pass
+    except Exception:
+        for saved in saved_files:
+            try:
+                saved.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+    if not signatures:
+        raise HTTPException(status_code=400, detail="No valid video files to process")
+
+    try:
+        chain(*signatures).apply_async()
+    except Exception as e:
+        # Roll back saved files and queued metadata so failed enqueue attempts
+        # don't leave orphaned uploads/queue entries behind.
+        for saved in saved_files:
+            try:
+                saved.unlink(missing_ok=True)
+            except Exception:
+                pass
+        for item in batch_items:
+            task_id = str(item.get("task_id") or "")
+            if not task_id:
+                continue
+            try:
+                await redis.delete(f"job:{task_id}")
+                await redis.zrem("jobs:active", task_id)
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue batch: {e}")
+
+    batch_payload = {
+        "batch_id": batch_id,
+        "state": "queued",
+        "created_at": time.time(),
+        "item_count": len(batch_items),
+        "target_size_mb": target_size_mb,
+        "video_codec": video_codec,
+        "audio_codec": audio_codec,
+        "audio_bitrate_kbps": audio_bitrate_kbps,
+        "preset": preset,
+        "container": container,
+        "tune": tune,
+        "zip_download_url": f"/api/batches/{batch_id}/download.zip",
+        "items": batch_items,
+    }
+    await redis.setex(f"batch:{batch_id}", BATCH_TTL_SECONDS, orjson.dumps(batch_payload).decode())
+
+    return BatchCreateResponse(
+        batch_id=batch_id,
+        item_count=len(batch_items),
+        state="queued",
+        items=[BatchItemStatus(**item) for item in batch_items],
+    )
+
+
+@app.get("/api/batches/{batch_id}/status", response_model=BatchStatusResponse, dependencies=[Depends(basic_auth)])
+async def get_batch_status(batch_id: str):
+    batch_payload = await _load_batch_payload(batch_id)
+    batch_payload = await _refresh_batch_payload(batch_payload)
+    await redis.setex(f"batch:{batch_id}", BATCH_TTL_SECONDS, orjson.dumps(batch_payload).decode())
+
+    items = [BatchItemStatus(**item) for item in (batch_payload.get("items") or [])]
+    completed_count = int(batch_payload.get("completed_count") or 0)
+    item_count = int(batch_payload.get("item_count") or len(items))
+    zip_url = None
+    if item_count > 0 and completed_count > 0:
+        zip_url = f"/api/batches/{batch_id}/download.zip"
+
+    return BatchStatusResponse(
+        batch_id=batch_id,
+        state=str(batch_payload.get("state") or "queued"),
+        item_count=item_count,
+        queued_count=int(batch_payload.get("queued_count") or 0),
+        running_count=int(batch_payload.get("running_count") or 0),
+        completed_count=completed_count,
+        failed_count=int(batch_payload.get("failed_count") or 0),
+        overall_progress=float(batch_payload.get("overall_progress") or 0.0),
+        items=items,
+        zip_download_url=zip_url,
+    )
+
+
+@app.get("/api/batches/{batch_id}/download.zip", dependencies=[Depends(basic_auth)])
+async def download_batch_zip(batch_id: str):
+    batch_payload = await _load_batch_payload(batch_id)
+    batch_payload = await _refresh_batch_payload(batch_payload)
+
+    files_to_zip: list[Path] = []
+    for item in (batch_payload.get("items") or []):
+        output_path = item.get("output_path")
+        if output_path and Path(output_path).is_file():
+            files_to_zip.append(Path(output_path))
+
+    if not files_to_zip:
+        raise HTTPException(status_code=404, detail="No completed files available for zip download")
+
+    zip_path = OUTPUTS_DIR / f"batch_{batch_id}.zip"
+    seen_names: set[str] = set()
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for src in files_to_zip:
+            arcname = src.name
+            if arcname in seen_names:
+                stem = src.stem
+                suffix = src.suffix
+                n = 2
+                while f"{stem}_{n}{suffix}" in seen_names:
+                    n += 1
+                arcname = f"{stem}_{n}{suffix}"
+            seen_names.add(arcname)
+            archive.write(src, arcname=arcname)
+
+    filename = f"8mblocal_batch_{batch_id[:8]}.zip"
+    return FileResponse(str(zip_path), filename=filename, media_type="application/zip")
 
 
 @app.get("/api/queue/status", response_model=QueueStatusResponse, dependencies=[Depends(basic_auth)])
