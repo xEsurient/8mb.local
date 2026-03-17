@@ -1,5 +1,10 @@
 services:
   8mblocal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_VERSION: "134"
     image: jms1717/8mblocal:latest
     container_name: 8mblocal
     ports:
