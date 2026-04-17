@@ -14,6 +14,7 @@
 
 - [Features](#features)
 - [Screenshots](#screenshots)
+- [Projects](#projects)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Usage](#usage)
@@ -85,6 +86,14 @@
     <td></td>
   </tr>
 </table>
+
+## Projects
+
+Public instances run by people who offer their **8mb.local** install for anyone to use (community compressors, demos, mirrors). If you run a public deployment and want it listed here, open a pull request that adds a row to this section.
+
+| Site | Notes |
+|------|--------|
+| [fits.video](https://fits.video/) | Online compressor (free and open source) |
 
 ## Architecture
 
