@@ -8,6 +8,9 @@
   let uploadedFileName: string | null = null; // Track what file was uploaded
   let isAnalyzing: boolean = false; // Track analysis state for UI feedback
   let targetMB = 25;
+  /** 'size' = target output file size (MB); 'bitrate' = fixed video bitrate (kbps). */
+  let targetMode: 'size' | 'bitrate' = 'size';
+  let targetVideoKbps = 2500;
   let videoCodec: string = 'av1_nvenc';
   let audioCodec: 'libopus' | 'aac' | 'none' = 'libopus';
   let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
@@ -90,9 +93,17 @@
   $: containerNote = (container === 'mp4' && audioCodec === 'libopus' && !audioOnly) ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
   $: estimated = jobInfo ? {
     duration_s: effectiveDuration,
-    total_kbps: effectiveDuration > 0 ? (targetMB * 8192.0) / effectiveDuration : 0,
-    video_kbps: effectiveDuration > 0 ? Math.max(((targetMB * 8192.0) / effectiveDuration) - (audioCodec === 'none' ? 0 : audioKbps), 0) : 0,
-    final_mb: targetMB
+    total_kbps: effectiveDuration > 0
+      ? (targetMode === 'bitrate'
+          ? (targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps))
+          : (targetMB * 8192.0) / effectiveDuration)
+      : 0,
+    video_kbps: targetMode === 'bitrate'
+      ? targetVideoKbps
+      : (effectiveDuration > 0 ? Math.max(((targetMB * 8192.0) / effectiveDuration) - (audioCodec === 'none' ? 0 : audioKbps), 0) : 0),
+    final_mb: targetMode === 'bitrate' && effectiveDuration > 0
+      ? ((targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps)) * effectiveDuration) / 8192.0
+      : targetMB
   } : null;
   // Update warning dynamically based on current estimate (no need to re-upload)
   $: warnText = estimated && estimated.video_kbps < 100 ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
@@ -567,10 +578,15 @@
       etaLabel = null;
       currentSpeedX = null;
       logLines = ['Starting compression…', ...logLines].slice(0, 500);
+      const estMb =
+        targetMode === 'bitrate' && effectiveDuration > 0
+          ? ((targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps)) * effectiveDuration) / 8192.0
+          : targetMB;
       const payload = {
         job_id: jobInfo.job_id,
         filename: jobInfo.filename,
-        target_size_mb: targetMB,
+        target_size_mb: estMb,
+        target_video_bitrate_kbps: targetMode === 'bitrate' ? targetVideoKbps : undefined,
         video_codec: videoCodec,
         audio_codec: audioCodec,
         audio_bitrate_kbps: audioKbps,
@@ -1179,15 +1195,40 @@
     </div>
   </div>
 
-  <div class="card grid grid-cols-2 gap-4">
-    <div class="space-x-2 flex flex-wrap gap-2">
-      {#each sizeButtons as b}
-        <button class="btn" on:click={()=>setPresetMB(b)}>{b}MB</button>
-      {/each}
+  <div class="card grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div class="space-y-2">
+      <div class="flex flex-wrap gap-3 text-sm items-center">
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="radio" name="targetMode" value="size" bind:group={targetMode} disabled={audioOnly} />
+          Target file size
+        </label>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="radio" name="targetMode" value="bitrate" bind:group={targetMode} disabled={audioOnly} />
+          Target video bitrate
+        </label>
+      </div>
+      {#if targetMode === 'size'}
+        <div class="space-x-2 flex flex-wrap gap-2">
+          {#each sizeButtons as b}
+            <button class="btn" type="button" on:click={()=>setPresetMB(b)}>{b}MB</button>
+          {/each}
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <label class="text-sm">Custom size (MB)</label>
+          <input class="input w-28" type="number" bind:value={targetMB} min="1" disabled={audioOnly} />
+        </div>
+      {:else}
+        <div class="flex items-center gap-2 flex-wrap">
+          <label class="text-sm">Video bitrate (kbps)</label>
+          <input class="input w-32" type="number" bind:value={targetVideoKbps} min="50" max="200000" step="50" disabled={audioOnly} />
+        </div>
+        <p class="text-xs text-gray-500">Audio is still set separately below; total size is not capped in this mode.</p>
+      {/if}
     </div>
-    <div class="flex items-center gap-2 justify-end">
-      <label class="text-sm">Custom size (MB)</label>
-      <input class="input w-28" type="number" bind:value={targetMB} min="1" />
+    <div class="text-sm text-gray-400 sm:text-right">
+      {#if estimated && targetMode === 'bitrate' && effectiveDuration > 0}
+        <p>≈ {estimated.final_mb.toFixed(2)} MB at this bitrate for the selected duration (estimate).</p>
+      {/if}
     </div>
   </div>
 

@@ -196,6 +196,12 @@ cd 8mb.local
 docker compose up -d --build
 ```
 
+With **NVIDIA GPU** (after `docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi` works on your host):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
 ### Platform Notes
 
 | Platform | GPU Support | Notes |

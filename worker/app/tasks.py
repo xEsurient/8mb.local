@@ -108,7 +108,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    max_width: int = None, max_height: int = None, start_time: str = None, end_time: str = None,
                    force_hw_decode: bool = False, fast_mp4_finalize: bool = False,
                    auto_resolution: bool = False, min_auto_resolution: int = 240,
-                   target_resolution: int | None = None, audio_only: bool = False):
+                   target_resolution: int | None = None, audio_only: bool = False,
+                   target_video_bitrate_kbps: float | None = None):
     # Detect hardware acceleration
     _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
     hw_info = get_hw_info()
@@ -118,7 +119,29 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
     info = ffprobe_info(input_path)
     duration = info.get("duration", 0.0)
-    total_kbps, video_kbps = calc_bitrates(target_size_mb, duration, audio_bitrate_kbps)
+    bitrate_mode = target_video_bitrate_kbps is not None and float(target_video_bitrate_kbps) > 0
+    if bitrate_mode:
+        video_kbps = float(target_video_bitrate_kbps)
+        total_kbps = video_kbps + float(audio_bitrate_kbps)
+        _publish(self.request.id, {"type": "log", "message": f"Target video bitrate: {int(video_kbps)} kbps (fixed; not derived from file size)"})
+    else:
+        total_kbps, video_kbps = calc_bitrates(target_size_mb, duration, audio_bitrate_kbps)
+    # Estimated size for progress / queue metadata when using fixed bitrate
+    progress_target_mb = target_size_mb
+    if bitrate_mode and duration > 0:
+        progress_target_mb = max(0.01, (total_kbps * duration) / 8192.0)
+
+    rot_deg = int(info.get("rotation_degrees") or 0)
+    disp_w = info.get("display_width") or info.get("width")
+    disp_h = info.get("display_height") or info.get("height")
+    if rot_deg % 360 != 0:
+        dar_note = ""
+        if info.get("display_aspect_ratio"):
+            dar_note = f" DAR {info.get('display_aspect_ratio')}."
+        _publish(self.request.id, {"type": "log", "message": (
+            f"Display rotation {rot_deg}° (coded {info.get('width')}×{info.get('height')}).{dar_note} "
+            "Using software decode so FFmpeg can apply display orientation (GPU decode ignores this metadata)."
+        )})
 
     # Bitrate controls
     maxrate = int(video_kbps * 1.2)
@@ -191,6 +214,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Map preset and tune
     preset_val = preset.lower()
     tune_val = (tune or "hq").lower()
+    if bitrate_mode and preset_val == "extraquality":
+        _publish(self.request.id, {"type": "log", "message": "Extra Quality uses constant-quality mode, not fixed bitrate — using P6 for this encode."})
+        preset_val = "p6"
 
     # Audio-only path: ignore video entirely and produce .m4a (aac) or .opus per requested audio codec
     if audio_only:
@@ -254,8 +280,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     preset_flags = []
     tune_flags = []
     
-    # Handle "extraquality" preset (slowest, best quality)
-    if preset_val == "extraquality":
+    # Handle "extraquality" preset (slowest, best quality) — not compatible with fixed target bitrate
+    if preset_val == "extraquality" and not bitrate_mode:
         _publish(self.request.id, {"type": "log", "message": "Extra Quality mode enabled (slowest encoding, best quality)"})
         if actual_encoder.endswith("_nvenc"):
             preset_flags = ["-preset", "p7"]
@@ -295,10 +321,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Build video filter chain
     vf_filters = []
     
-    # Resolution scaling (explicit or auto)
+    # Resolution scaling (explicit or auto) — use display dimensions when rotation metadata swaps W/H
     if auto_resolution:
         aw, ah = choose_auto_resolution(
-            info.get("width"), info.get("height"), info.get("video_bitrate_kbps"),
+            disp_w, disp_h, info.get("video_bitrate_kbps"),
             video_kbps, min_auto_resolution, target_resolution
         )
         if ah:
@@ -437,12 +463,12 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     if force_hw_decode:
         _publish(self.request.id, {"type": "log", "message": "Force hardware decode: enabled"})
 
-    # AV1 decode strategy
+    # AV1 decode strategy (skip GPU decode when display rotation metadata is present — it is not applied like software)
     if in_codec == "av1":
         if actual_encoder.endswith("_nvenc"):
             # Never use av1_cuvid from "decoder exists in ffmpeg" alone: force_hw_decode / preferHwDecode
             # must not bypass a runtime probe — many builds list av1_cuvid while the GPU/driver cannot decode AV1.
-            if has_decoder("av1_cuvid") and can_av1_cuvid_decode(input_path):
+            if has_decoder("av1_cuvid") and can_av1_cuvid_decode(input_path) and rot_deg % 360 == 0:
                 init_hw_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + init_hw_flags
                 input_opts += ["-c:v", "av1_cuvid"]
                 v_flags = [f for i, f in enumerate(v_flags) if not (f == "-pix_fmt" or (i > 0 and v_flags[i-1] == "-pix_fmt"))]
@@ -458,8 +484,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         else:
             input_opts += ["-c:v", "libdav1d"]
             _publish(self.request.id, {"type": "log", "message": "Decoder: using libdav1d (CPU encoder path)"})
-    elif in_codec in ("h264", "hevc") and actual_encoder.endswith("_nvenc"):
-        # H.264/HEVC: NVDEC widely supported; always prefer CUDA when using NVENC
+    elif in_codec in ("h264", "hevc") and actual_encoder.endswith("_nvenc") and rot_deg % 360 == 0:
+        # H.264/HEVC: NVDEC widely supported; prefer CUDA when using NVENC (software decode if rotation metadata must be honored)
         init_hw_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + init_hw_flags
         # Remove -pix_fmt if present (GPU surfaces)
         v_flags = [f for i, f in enumerate(v_flags) if not (f == "-pix_fmt" or (i > 0 and v_flags[i-1] == "-pix_fmt"))]
@@ -468,7 +494,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
         _publish(self.request.id, {"type": "log", "message": f"Decoder: using cuda ({in_codec})"})
 
-    # Construct command
+    # Construct command (decoder autorotate is left ON for SW decode — manual transpose was flipping some phone clips)
     cmd = [
         "ffmpeg", "-hide_banner", "-y",
         *init_hw_flags,  # Hardware initialization (CUDA device setup)
@@ -622,7 +648,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                                     pass
                             
                             # Tertiary: Size-based sanity check (detect if way off)
-                            target_bytes = target_size_mb * 1024 * 1024
+                            target_bytes = progress_target_mb * 1024 * 1024
                             size_progress = 0.0
                             if current_size_bytes > 0 and target_bytes > 0:
                                 # Only use size if it's reasonable (within 2x of time progress)
@@ -880,26 +906,26 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Checking file size and preparing for possible retry
     final_size_mb = round(final_size / (1024*1024), 2) if final_size else 0
     
-    # Check if file is too large (>2% over target) and retry with lower bitrate
-    size_overage_percent = ((final_size_mb - target_size_mb) / target_size_mb) * 100 if target_size_mb > 0 else 0
+    # Check if file is too large (>2% over target) and retry with lower bitrate (size-target mode only)
+    size_overage_percent = ((final_size_mb - progress_target_mb) / progress_target_mb) * 100 if progress_target_mb > 0 else 0
     
     # Track retry attempt (stored in task metadata)
     retry_attempt = self.request.retries or 0
     max_retries = 2  # Maximum 2 retry attempts
     
-    if size_overage_percent > 2.0 and final_size_mb > target_size_mb and retry_attempt < max_retries:
+    if (not bitrate_mode) and size_overage_percent > 2.0 and final_size_mb > progress_target_mb and retry_attempt < max_retries:
         # Calculate if retry is feasible
         # If we need to reduce bitrate below 50%, it's probably impossible
         reduction_factor = max(0.5, 1.0 - (size_overage_percent / 100.0) - 0.05)
         
         if reduction_factor < 0.5:
             _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target, but further reduction would compromise quality too much."})
-            _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {target_size_mb:.2f} MB). Consider adjusting target size or resolution."})
+            _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {progress_target_mb:.2f} MB). Consider adjusting target size or resolution."})
         else:
             # File is too large! Notify user and retry
-            _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target ({final_size_mb:.2f} MB vs {target_size_mb:.2f} MB)"})
+            _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target ({final_size_mb:.2f} MB vs {progress_target_mb:.2f} MB)"})
             _publish(self.request.id, {"type": "log", "message": f"🔄 Retry attempt {retry_attempt + 1}/{max_retries} with reduced bitrate..."})
-            _publish(self.request.id, {"type": "retry", "message": f"File too large ({final_size_mb:.2f} MB), retrying to fit {target_size_mb:.2f} MB target (attempt {retry_attempt + 1}/{max_retries})", "overage_percent": round(size_overage_percent, 1)})
+            _publish(self.request.id, {"type": "retry", "message": f"File too large ({final_size_mb:.2f} MB), retrying to fit {progress_target_mb:.2f} MB target (attempt {retry_attempt + 1}/{max_retries})", "overage_percent": round(size_overage_percent, 1)})
             
             # Calculate adjusted bitrate
             adjusted_video_kbps = int(video_kbps * reduction_factor)
@@ -962,7 +988,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 try:
                     final_size = os.path.getsize(output_path)
                     final_size_mb = round(final_size / (1024*1024), 2)
-                    new_overage = ((final_size_mb - target_size_mb) / target_size_mb) * 100 if target_size_mb > 0 else 0
+                    new_overage = ((final_size_mb - progress_target_mb) / progress_target_mb) * 100 if progress_target_mb > 0 else 0
                     if new_overage <= 0:
                         _publish(self.request.id, {"type": "log", "message": f"✅ Retry successful! Final size: {final_size_mb:.2f} MB (under target)"})
                     else:
@@ -971,7 +997,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                     final_size = 0
     elif size_overage_percent > 2.0 and retry_attempt >= max_retries:
         _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target after {max_retries} retries. Keeping best result."})
-        _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {target_size_mb:.2f} MB)"})
+        _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {progress_target_mb:.2f} MB)"})
     
     stats = {
         "input_path": input_path,
@@ -979,6 +1005,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         "duration_s": duration,
         "target_size_mb": target_size_mb,
         "final_size_mb": final_size_mb,
+        "target_video_bitrate_kbps": int(video_kbps) if bitrate_mode else None,
     }
     
     # Advance progress before final save - 3/4 through finalization

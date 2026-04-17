@@ -17,6 +17,8 @@ class CompressRequest(BaseModel):
     job_id: str
     filename: str
     target_size_mb: float
+    # When set (>0), worker uses this video bitrate (kbps) instead of deriving from target_size_mb.
+    target_video_bitrate_kbps: Optional[float] = Field(default=None, ge=0, le=2_000_000)
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     audio_bitrate_kbps: int = 128

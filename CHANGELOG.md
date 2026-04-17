@@ -1,5 +1,23 @@
 # Changelog
 
+## [v136] - 2026-04-17
+
+### Portrait / display orientation
+
+- **ffprobe** now uses **`-show_format` + `-show_streams`** (full stream JSON) so **Display Matrix** rotation is present for phone **HEVC/MP4** files where a narrow `-show_entries` query omitted it.
+- **Rotation parsing** treats **`rotation` on any `side_data_list` entry** as authoritative (not only when `side_data_type` contains “display matrix”).
+- When rotation is non-zero, the worker **avoids CUDA/NVDEC decode** for H.264/HEVC/AV1 paths so **decoder autorotation** runs; output dimensions match **display** size (e.g. **1080×1920**) instead of coded **1920×1080** for portrait clips stored with a −90° matrix.
+
+### Target video bitrate
+
+- Optional **`target_video_bitrate_kbps`**: compress to a fixed video bitrate (API, batch upload, and UI) instead of deriving rate only from target file size.
+
+### Docker / ops
+
+- **Default `docker-compose.yml`** does not request `gpus:` so **`docker compose up`** works without GPU passthrough; use **`docker-compose.gpu.yml`** as an overlay for NVIDIA (documented in **README**).
+
+---
+
 ## [v135] - 2026-04-14
 
 ### Architecture: NVIDIA + CPU only

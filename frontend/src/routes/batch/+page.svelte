@@ -73,6 +73,8 @@
   let isDragActive = false;
 
   let targetMB = 8;
+  let targetMode: 'size' | 'bitrate' = 'size';
+  let targetVideoKbps = 2500;
   let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
   let videoCodec = 'av1_nvenc';
   let audioCodec: 'libopus'|'aac'|'none' = 'libopus';
@@ -518,6 +520,7 @@
       const resolvedMaxHeight = audioOnly ? undefined : ((autoResolution && !explicitHeight) ? undefined : (explicitHeight || maxHeight || undefined));
       const payload = {
         target_size_mb: targetMB,
+        target_video_bitrate_kbps: targetMode === 'bitrate' ? targetVideoKbps : undefined,
         video_codec: videoCodec,
         audio_codec: audioCodec,
         audio_bitrate_kbps: audioKbps,
@@ -694,11 +697,24 @@
   <div class="card space-y-4">
     <h2 class="font-semibold">2) Compression Settings</h2>
 
-    <div class="space-x-2 flex flex-wrap gap-2">
-      {#each sizeButtons as b}
-        <button class="btn" type="button" on:click={() => setPresetMB(Number(b))}>{b}MB</button>
-      {/each}
+    <div class="flex flex-wrap gap-3 text-sm items-center mb-2">
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="radio" name="batchTargetMode" value="size" bind:group={targetMode} disabled={audioOnly} />
+        Target file size
+      </label>
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="radio" name="batchTargetMode" value="bitrate" bind:group={targetMode} disabled={audioOnly} />
+        Target video bitrate
+      </label>
     </div>
+
+    {#if targetMode === 'size'}
+      <div class="space-x-2 flex flex-wrap gap-2">
+        {#each sizeButtons as b}
+          <button class="btn" type="button" on:click={() => setPresetMB(Number(b))}>{b}MB</button>
+        {/each}
+      </div>
+    {/if}
 
     {#if presetProfiles.length > 0}
       <label class="block text-sm">
@@ -712,10 +728,24 @@
     {/if}
 
     <div class="grid md:grid-cols-2 gap-3">
-      <label class="block text-sm">
-        <span class="block mb-1">Target size (MB)</span>
-        <input class="input w-full" type="number" min="1" step="0.1" bind:value={targetMB} />
-      </label>
+      <div class="space-y-2">
+        {#if targetMode === 'size'}
+          <label class="block text-sm">
+            <span class="block mb-1">Target size (MB)</span>
+            <input class="input w-full" type="number" min="1" step="0.1" bind:value={targetMB} disabled={audioOnly} />
+          </label>
+        {:else}
+          <label class="block text-sm">
+            <span class="block mb-1">Video bitrate (kbps)</span>
+            <input class="input w-full" type="number" min="50" max="200000" step="50" bind:value={targetVideoKbps} disabled={audioOnly} />
+          </label>
+          <label class="block text-sm">
+            <span class="block mb-1">Queue label (MB)</span>
+            <input class="input w-full" type="number" min="1" step="0.1" bind:value={targetMB} disabled={audioOnly} />
+            <span class="block mt-1 text-xs text-gray-500">Shown in the job queue only; encoding uses the bitrate above.</span>
+          </label>
+        {/if}
+      </div>
       <label class="block text-sm">
         <span class="block mb-1">Quality preset</span>
         <select class="input w-full" bind:value={preset}>

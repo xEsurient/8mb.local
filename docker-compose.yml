@@ -1,10 +1,13 @@
+# Default: no GPU request — `docker compose up -d` works even when Docker/WSL cannot see the GPU yet.
+# For NVENC / CUDA, after `docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi` works:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 services:
   8mblocal:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "135"
+        BUILD_VERSION: "136"
     image: jms1717/8mblocal:latest
     container_name: 8mblocal
     ports:
@@ -13,12 +16,6 @@ services:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./.env:/app/.env  # optional custom settings
-    
-    # NVIDIA GPU acceleration: requires NVIDIA Container Toolkit
-    # Install: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
-    gpus: all
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
     restart: unless-stopped

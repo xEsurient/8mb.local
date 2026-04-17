@@ -34,7 +34,7 @@ async def health():
 @router.get("/api/version")
 async def api_version():
     """Return application version baked at build time."""
-    ver = os.getenv("APP_VERSION", "123")
+    ver = os.getenv("APP_VERSION", "136")
     return {"version": ver}
 
 

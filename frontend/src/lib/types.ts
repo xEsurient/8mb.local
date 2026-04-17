@@ -40,6 +40,7 @@ export interface CompressOptions {
 	min_auto_resolution?: number;
 	target_resolution?: number | null;
 	audio_only?: boolean;
+	target_video_bitrate_kbps?: number | null;
 }
 
 /** Response from GET /api/jobs/{task_id}/status. */
@@ -81,6 +82,7 @@ export interface BatchUploadPayload {
 	min_auto_resolution?: number;
 	target_resolution?: number | null;
 	audio_only?: boolean;
+	target_video_bitrate_kbps?: number | null;
 }
 
 /** Individual item within a batch status response. */
@@ -119,6 +121,7 @@ export interface CompressStats {
 	duration_s: number;
 	target_size_mb: number;
 	final_size_mb: number;
+	target_video_bitrate_kbps?: number | null;
 }
 
 /** Preset profile as returned by the settings API. */

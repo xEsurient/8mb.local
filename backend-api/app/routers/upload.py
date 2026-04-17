@@ -83,6 +83,7 @@ async def upload_batch(
     min_auto_resolution: int = Form(240),
     target_resolution: int | None = Form(None),
     audio_only: bool = Form(False),
+    target_video_bitrate_kbps: float | None = Form(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -133,6 +134,7 @@ async def upload_batch(
                 min_auto_resolution=min_auto_resolution,
                 target_resolution=target_resolution,
                 audio_only=bool(audio_only),
+                target_video_bitrate_kbps=target_video_bitrate_kbps,
             )
 
             signatures.append(

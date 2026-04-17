@@ -44,6 +44,7 @@ async def compress(req: CompressRequest):
             input_path=str(input_path),
             output_path=str(output_path),
             target_size_mb=req.target_size_mb,
+            target_video_bitrate_kbps=req.target_video_bitrate_kbps,
             video_codec=req.video_codec,
             audio_codec=req.audio_codec,
             audio_bitrate_kbps=req.audio_bitrate_kbps,

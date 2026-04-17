@@ -101,6 +101,7 @@ export function uploadBatchWithProgress(
     appendMaybe('min_auto_resolution', payload.min_auto_resolution);
     appendMaybe('target_resolution', payload.target_resolution);
     appendMaybe('audio_only', payload.audio_only);
+    appendMaybe('target_video_bitrate_kbps', payload.target_video_bitrate_kbps);
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BACKEND}/api/batches/upload`);
