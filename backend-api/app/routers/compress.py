@@ -60,6 +60,7 @@ async def compress(req: CompressRequest):
             min_auto_resolution=req.min_auto_resolution,
             target_resolution=req.target_resolution,
             audio_only=bool(req.audio_only or False),
+            max_output_fps=req.max_output_fps,
         ),
     )
     try:

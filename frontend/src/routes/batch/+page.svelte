@@ -11,6 +11,7 @@
     getPresetProfiles,
     openProgressStream,
   } from '$lib/api';
+  import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
 
   type BatchItem = {
     index: number;
@@ -54,6 +55,7 @@
     audio_kbps: number;
     container: 'mp4' | 'mkv';
     tune: 'hq' | 'll' | 'ull' | 'lossless';
+    max_output_fps?: number | null;
   };
 
   const VIDEO_EXTENSIONS_LIST = [
@@ -91,6 +93,7 @@
   let startTime = '';
   let endTime = '';
   let audioOnly = false;
+  let maxFpsCap: FpsCap = '';
 
   let availableCodecs: CodecOption[] = [];
   $: nvidiaCodecs = availableCodecs.filter((c) => c.group === 'nvidia');
@@ -213,6 +216,7 @@
     audioKbps = Number(p.audio_kbps);
     container = p.container;
     tune = p.tune;
+    maxFpsCap = maxFpsFromProfile(p.max_output_fps);
   }
 
   function pushLiveLog(message: string) {
@@ -537,6 +541,7 @@
         min_auto_resolution: minAutoHeight,
         target_resolution: explicitHeight || undefined,
         audio_only: audioOnly,
+        max_output_fps: maxFpsCap === '' ? undefined : Number(maxFpsCap),
       };
 
       const result = await uploadBatchWithProgress(selectedFiles, payload, {
@@ -631,12 +636,26 @@
     } catch {
       // Ignore localStorage access errors.
     }
+    try {
+      const parsedFps = parseStoredFpsCap(localStorage.getItem('maxOutputFpsCap'));
+      if (parsedFps !== null) maxFpsCap = parsedFps;
+    } catch {
+      // Ignore
+    }
   });
 
   onDestroy(() => {
     stopPolling();
     closeLiveTaskStream();
   });
+
+  $: {
+    try {
+      localStorage.setItem('maxOutputFpsCap', maxFpsCap);
+    } catch {
+      // ignore
+    }
+  }
 </script>
 
 <div class="max-w-5xl mx-auto mt-8 space-y-6">
@@ -876,6 +895,15 @@
           <label class="block text-sm">
             <span class="block mb-1">Max Height (px)</span>
             <input class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" disabled={audioOnly || autoResolution || !!explicitHeight} />
+          </label>
+          <label class="block text-sm">
+            <span class="block mb-1">Max frame rate</span>
+            <select class="input w-full" bind:value={maxFpsCap} disabled={audioOnly}>
+              <option value="">Same as input (default)</option>
+              {#each FPS_CAP_VALUES as v}
+                <option value={v}>{v} fps (cap)</option>
+              {/each}
+            </select>
           </label>
           <label class="block text-sm">
             <span class="block mb-1">Start Time</span>

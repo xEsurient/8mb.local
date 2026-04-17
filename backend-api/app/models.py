@@ -9,6 +9,7 @@ class UploadResponse(BaseModel):
     original_audio_bitrate_kbps: Optional[float] = None
     original_width: Optional[int] = None
     original_height: Optional[int] = None
+    original_video_fps: Optional[float] = None
     estimate_total_kbps: float
     estimate_video_kbps: float
     warn_low_quality: bool
@@ -38,6 +39,8 @@ class CompressRequest(BaseModel):
     min_auto_resolution: Optional[int] = 240  # Do not downscale below this unless user overrides
     target_resolution: Optional[int] = None   # Explicit target height (e.g., 1080, 720); overrides auto selection
     audio_only: Optional[bool] = False        # Convert to audio-only output (.m4a) ignoring video settings
+    # When set (>0), output frame rate is capped to this value if the source is faster (no increase for low-fps sources).
+    max_output_fps: Optional[float] = Field(default=None, ge=0, le=1000)
 
 class StatusResponse(BaseModel):
     state: str
@@ -102,6 +105,7 @@ class PresetProfile(BaseModel):
     audio_kbps: Literal[64,96,128,160,192,256]
     container: Literal['mp4','mkv']
     tune: Literal['hq','ll','ull','lossless']
+    max_output_fps: Optional[float] = Field(default=None, ge=0, le=1000)
 
 
 class PresetProfilesResponse(BaseModel):

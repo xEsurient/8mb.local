@@ -109,7 +109,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    force_hw_decode: bool = False, fast_mp4_finalize: bool = False,
                    auto_resolution: bool = False, min_auto_resolution: int = 240,
                    target_resolution: int | None = None, audio_only: bool = False,
-                   target_video_bitrate_kbps: float | None = None):
+                   target_video_bitrate_kbps: float | None = None,
+                   max_output_fps: float | None = None):
     # Detect hardware acceleration
     _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
     hw_info = get_hw_info()
@@ -493,6 +494,47 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if vf_filters:
             vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
         _publish(self.request.id, {"type": "log", "message": f"Decoder: using cuda ({in_codec})"})
+
+    # Optional output frame-rate cap: only when we know source fps is above the cap (same as input otherwise).
+    input_fps = info.get("video_fps")
+    if max_output_fps is not None and float(max_output_fps) > 0:
+        cap = float(max_output_fps)
+        if input_fps is None:
+            _publish(self.request.id, {"type": "log", "message": (
+                f"Frame rate: {cap:g} fps cap not applied — could not read source frame rate; "
+                "keeping native timing (same as input)."
+            )})
+        elif float(input_fps) <= cap + 0.01:
+            pass  # already at or below cap — preserve input fps
+        else:
+            fps_filter = f"fps=fps={cap}"
+            has_npp = any("scale_npp=" in f for f in vf_filters)
+            cuda_hw_frames = (
+                actual_encoder.endswith("_nvenc")
+                and "-hwaccel_output_format" in init_hw_flags
+                and "cuda" in init_hw_flags
+            )
+            if has_npp or cuda_hw_frames:
+                if vf_filters:
+                    vf_filters = [",".join(vf_filters) + ",hwdownload,format=yuv420p," + fps_filter]
+                else:
+                    vf_filters = [f"hwdownload,format=yuv420p,{fps_filter}"]
+                if actual_encoder.endswith("_nvenc") and not any(
+                    v_flags[i] == "-pix_fmt" for i in range(len(v_flags))
+                ):
+                    nvenc_pix = ["-pix_fmt", "yuv420p"]
+                    if "h264" in actual_encoder:
+                        nvenc_pix += ["-profile:v", "high"]
+                    elif "hevc" in actual_encoder:
+                        nvenc_pix += ["-profile:v", "main"]
+                    v_flags = nvenc_pix + v_flags
+            else:
+                if vf_filters:
+                    vf_filters = vf_filters + [fps_filter]
+                else:
+                    vf_filters = [fps_filter]
+            ip = f"{float(input_fps):.3g}"
+            _publish(self.request.id, {"type": "log", "message": f"Frame rate: capping at {cap:g} fps (source ~{ip} fps)"})
 
     # Construct command (decoder autorotate is left ON for SW decode — manual transpose was flipping some phone clips)
     cmd = [

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { FPS_CAP_VALUES, type FpsCap } from '$lib/fpsCap';
 
   type AuthSettings = { auth_enabled: boolean; auth_user: string | null };
   type DefaultPresets = {
@@ -42,6 +43,8 @@
   let audioKbps = 128;
   let container = 'mp4';
   let tune = 'hq';
+  /** Included in preset profiles created via “Add from current defaults”. */
+  let profileMaxFpsCap: FpsCap = '';
 
   // Codec visibility - individual codecs
   let codecSettings: CodecVisibilitySettings = {
@@ -306,10 +309,12 @@
 		if (!newPresetName.trim()) { error='Preset name required'; return; }
 		saving = true; error=''; message='';
 		try {
+			const maxFpsPayload = profileMaxFpsCap === '' ? null : Number(profileMaxFpsCap);
 			const res = await fetch('/api/settings/preset-profiles', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-				name: newPresetName.trim(), target_mb: targetMB, video_codec: videoCodec, audio_codec: audioCodec, preset, audio_kbps: audioKbps, container, tune
+				name: newPresetName.trim(), target_mb: targetMB, video_codec: videoCodec, audio_codec: audioCodec, preset, audio_kbps: audioKbps, container, tune,
+				max_output_fps: maxFpsPayload
 			})});
-			if (res.ok){ message='Added preset'; presetProfiles = [...presetProfiles, { name:newPresetName.trim(), target_mb: targetMB, video_codec: videoCodec, audio_codec: audioCodec, preset, audio_kbps: audioKbps, container, tune }]; newPresetName=''; }
+			if (res.ok){ message='Added preset'; presetProfiles = [...presetProfiles, { name:newPresetName.trim(), target_mb: targetMB, video_codec: videoCodec, audio_codec: audioCodec, preset, audio_kbps: audioKbps, container, tune, max_output_fps: maxFpsPayload }]; newPresetName=''; }
 			else { const d = await res.json(); error = d.detail || 'Failed to add preset'; }
 		} catch { error = 'Failed to add preset'; } finally { saving=false; }
 	}
@@ -579,6 +584,18 @@
 		<div style="margin-top:12px">
 			<div class="row">
 				<div>
+					<label class="label">Max frame rate (stored in new presets)</label>
+					<p class="label" style="color:#6b7280; font-size:12px; margin:4px 0 8px">Defaults to same as input unless you choose a cap.</p>
+					<select class="select" bind:value={profileMaxFpsCap}>
+						<option value="">Same as input (default)</option>
+						{#each FPS_CAP_VALUES as v}
+							<option value={v}>{v} fps cap</option>
+						{/each}
+					</select>
+				</div>
+			</div>
+			<div class="row" style="margin-top:12px">
+				<div>
 					<label class="label">New preset name</label>
 					<input class="input" type="text" bind:value={newPresetName} placeholder="e.g., H265 9.7MB (NVENC)" />
 				</div>
@@ -593,7 +610,7 @@
 					{#each presetProfiles as p}
 						<div style="background:#1f2937; border:1px solid #374151; border-radius:8px; padding:10px">
 							<div style="font-weight:600">{p.name}</div>
-							<div style="font-size:12px; color:#9ca3af">{p.video_codec} • {p.audio_codec} • {p.preset} • {p.target_mb}MB</div>
+							<div style="font-size:12px; color:#9ca3af">{p.video_codec} • {p.audio_codec} • {p.preset} • {p.target_mb}MB{#if p.max_output_fps != null && p.max_output_fps > 0} • max {p.max_output_fps} fps{/if}</div>
 						</div>
 						<div style="display:flex; align-items:center"><button class="btn" style="background:#374151" on:click={()=>deletePreset(p.name)} disabled={saving}>Delete</button></div>
 					{/each}

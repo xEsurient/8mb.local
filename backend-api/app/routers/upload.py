@@ -57,6 +57,7 @@ async def upload(file: UploadFile = File(...), target_size_mb: float = 25.0, aud
         original_audio_bitrate_kbps=info["audio_bitrate_kbps"],
         original_width=info.get("width"),
         original_height=info.get("height"),
+        original_video_fps=info.get("video_fps"),
         estimate_total_kbps=total_kbps,
         estimate_video_kbps=video_kbps,
         warn_low_quality=warn,
@@ -84,6 +85,7 @@ async def upload_batch(
     target_resolution: int | None = Form(None),
     audio_only: bool = Form(False),
     target_video_bitrate_kbps: float | None = Form(None),
+    max_output_fps: float | None = Form(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -135,6 +137,7 @@ async def upload_batch(
                 target_resolution=target_resolution,
                 audio_only=bool(audio_only),
                 target_video_bitrate_kbps=target_video_bitrate_kbps,
+                max_output_fps=max_output_fps,
             )
 
             signatures.append(

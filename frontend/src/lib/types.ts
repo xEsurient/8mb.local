@@ -14,6 +14,8 @@ export interface ProbeResult {
 	original_audio_bitrate_kbps: number | null;
 	original_width: number | null;
 	original_height: number | null;
+	/** Detected video frame rate (avg), when ffprobe reports it */
+	original_video_fps?: number | null;
 	estimate_total_kbps: number;
 	estimate_video_kbps: number;
 	warn_low_quality: boolean;
@@ -41,6 +43,7 @@ export interface CompressOptions {
 	target_resolution?: number | null;
 	audio_only?: boolean;
 	target_video_bitrate_kbps?: number | null;
+	max_output_fps?: number | null;
 }
 
 /** Response from GET /api/jobs/{task_id}/status. */
@@ -83,6 +86,7 @@ export interface BatchUploadPayload {
 	target_resolution?: number | null;
 	audio_only?: boolean;
 	target_video_bitrate_kbps?: number | null;
+	max_output_fps?: number | null;
 }
 
 /** Individual item within a batch status response. */
@@ -134,6 +138,8 @@ export interface PresetProfile {
 	audio_kbps: number;
 	container: 'mp4' | 'mkv';
 	tune: string;
+	/** Optional cap; omitted or null = same as source when applying preset */
+	max_output_fps?: number | null;
 }
 
 /** Hardware info from GET /api/hardware. */

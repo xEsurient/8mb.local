@@ -12,9 +12,15 @@
 
 - Optional **`target_video_bitrate_kbps`**: compress to a fixed video bitrate (API, batch upload, and UI) instead of deriving rate only from target file size.
 
+### Max frame rate (UI)
+
+- **Max frame rate** cap control moved to **Advanced Options** on the main encode page (no longer beside Resolution).
+- Cap choices extended through **120 fps** (24, 25, 30, 50, 60, 72, 90, 100, 120), with the same list on **Batch**, **Settings** (preset defaults), and shared **`$lib/fpsCap`** parsing for `localStorage`.
+
 ### Docker
 
 - Default **`docker-compose.yml`** requests **`gpus: all`** (NVIDIA). Hosts without GPU passthrough can use **`docker-compose.cpu.yml`** (`docker compose -f docker-compose.cpu.yml up -d --build`).
+- **Docker Hub:** **`jms1717/8mblocal:latest`** and **`jms1717/8mblocal:v136`** published for this release (`BUILD_VERSION` **136**). Pull: `docker pull jms1717/8mblocal:v136` (or `:latest`).
 
 ---
 

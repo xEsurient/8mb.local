@@ -92,10 +92,30 @@ def get_hw_info_fresh(timeout: int = 10) -> dict:
 # ---------------------------------------------------------------------------
 # ffprobe / bitrate helpers
 # ---------------------------------------------------------------------------
+def _parse_fps_fraction(s: str | None) -> float | None:
+    if not s or s in ("0/0", "N/A"):
+        return None
+    s = str(s).strip()
+    if "/" in s:
+        a, b = s.split("/", 1)
+        try:
+            num, den = float(a), float(b)
+            if den == 0:
+                return None
+            return num / den
+        except ValueError:
+            return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
 def ffprobe(input_path: Path) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
-        "-show_entries", "format=duration:stream=index,codec_type,bit_rate,width,height",
+        "-show_entries",
+        "format=duration:stream=index,codec_type,codec_name,bit_rate,width,height,avg_frame_rate,r_frame_rate",
         "-of", "json",
         str(input_path),
     ]
@@ -108,13 +128,21 @@ def ffprobe(input_path: Path) -> dict:
     a_bitrate = None
     v_width = None
     v_height = None
+    v_fps = None
+    video_seen = False
     for s in data.get("streams", []):
-        if s.get("codec_type") == "video" and s.get("bit_rate"):
-            v_bitrate = float(s["bit_rate"]) / 1000.0
+        if s.get("codec_type") == "video":
+            if s.get("bit_rate"):
+                v_bitrate = float(s["bit_rate"]) / 1000.0
             if s.get("width"):
                 v_width = int(s["width"])
             if s.get("height"):
                 v_height = int(s["height"])
+            if not video_seen:
+                v_fps = _parse_fps_fraction(s.get("avg_frame_rate"))
+                if v_fps is None or v_fps <= 0:
+                    v_fps = _parse_fps_fraction(s.get("r_frame_rate"))
+                video_seen = True
         if s.get("codec_type") == "audio" and s.get("bit_rate"):
             a_bitrate = float(s["bit_rate"]) / 1000.0
     return {
@@ -123,6 +151,7 @@ def ffprobe(input_path: Path) -> dict:
         "audio_bitrate_kbps": a_bitrate,
         "width": v_width,
         "height": v_height,
+        "video_fps": v_fps,
     }
 
 

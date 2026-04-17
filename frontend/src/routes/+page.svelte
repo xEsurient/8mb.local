@@ -2,6 +2,7 @@
   import '../app.css';
   import { onMount, onDestroy } from 'svelte';
   import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
+  import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
@@ -34,6 +35,8 @@
   let minAutoHeight: 240|360|480|720 = 240; // do not go below unless user changes
   let explicitHeight: 2160|1440|1080|720|480|360|240|null = null; // explicit override
   let audioOnly: boolean = false; // Audio-only conversion
+  /** '' = no cap; otherwise max output fps when source is faster (persisted). */
+  let maxFpsCap: FpsCap = '';
   let startTime: string = '';
   let endTime: string = '';
   // New UI options
@@ -242,6 +245,8 @@
       const aab = localStorage.getItem('autoAudioBitrate');
       if (aab !== null) autoAudioBitrate = (aab === 'true');
       if (aab === null) localStorage.setItem('autoAudioBitrate', 'true');
+      const parsedFps = parseStoredFpsCap(localStorage.getItem('maxOutputFpsCap'));
+      if (parsedFps !== null) maxFpsCap = parsedFps;
     } catch {}
     try {
       const res = await fetch('/api/settings/presets');
@@ -341,6 +346,7 @@
     audioKbps = p.audio_kbps;
     container = p.container;
     tune = p.tune;
+    maxFpsCap = maxFpsFromProfile(p.max_output_fps);
   }
 
   function formatDurationTime(seconds: number): string {
@@ -602,6 +608,7 @@
         min_auto_resolution: minAutoHeight,
         target_resolution: explicitHeight || undefined,
         audio_only: audioOnly,
+        max_output_fps: maxFpsCap === '' ? undefined : Number(maxFpsCap),
         start_time: startTime.trim() || undefined,
         end_time: endTime.trim() || undefined,
       };
@@ -1015,6 +1022,7 @@
   $: (() => { try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {} })();
   $: (() => { try { localStorage.setItem('autoDownload', String(autoDownload)); } catch {} })();
   $: (() => { try { localStorage.setItem('autoAudioBitrate', String(autoAudioBitrate)); } catch {} })();
+  $: (() => { try { localStorage.setItem('maxOutputFpsCap', maxFpsCap); } catch {} })();
 </script>
 
 <div class="max-w-3xl mx-auto mt-8 space-y-6">
@@ -1289,7 +1297,7 @@
         </label>
       </div>
       {#if jobInfo?.original_width && jobInfo?.original_height}
-        <p class="text-xs opacity-70 mt-1">Input: {jobInfo.original_width}×{jobInfo.original_height} → Output: {explicitHeight ? `${explicitHeight}p (max height)` : (autoResolution ? `auto (≥${minAutoHeight}p)` : (maxHeight || 'original'))}</p>
+        <p class="text-xs opacity-70 mt-1">Input: {jobInfo.original_width}×{jobInfo.original_height}{#if jobInfo.original_video_fps != null && jobInfo.original_video_fps > 0}&nbsp;· ~{Number(jobInfo.original_video_fps).toFixed(2).replace(/\.?0+$/, '')} fps{/if} → Output: {explicitHeight ? `${explicitHeight}p (max height)` : (autoResolution ? `auto (≥${minAutoHeight}p)` : (maxHeight || 'original'))}{#if maxFpsCap} · max {maxFpsCap} fps{/if}</p>
       {/if}
     </div>
     <div>
@@ -1354,6 +1362,16 @@
             <option value="lossless">Lossless (no quality loss)</option>
           </select>
           <p class="mt-1 text-xs opacity-70">Quality = best visuals. Low/Ultra‑low latency = faster encodes (good for screen/streams). Lossless = huge files.</p>
+        </div>
+        <div class="sm:col-span-2 lg:col-span-4">
+          <label class="block mb-1 text-sm">Max frame rate</label>
+          <select class="input w-full max-w-md" bind:value={maxFpsCap} disabled={audioOnly}>
+            <option value="">Same as input (default)</option>
+            {#each FPS_CAP_VALUES as v}
+              <option value={v}>{v} fps (cap)</option>
+            {/each}
+          </select>
+          <p class="text-xs opacity-70 mt-1">Default keeps the same frame rate as the input. If you pick a cap and the source is faster, the output is reduced. Slower sources stay unchanged. Saved in this browser.</p>
         </div>
       </div>
       <!-- Preset Profiles moved here (smaller) -->

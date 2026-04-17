@@ -27,6 +27,28 @@ def get_gpu_env() -> dict[str, str]:
     return env
 
 
+def parse_fps_fraction(val: Any) -> Optional[float]:
+    """Parse ffprobe avg_frame_rate / r_frame_rate (e.g. '60/1', '30000/1001') to float fps."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s in ("0/0", "N/A"):
+        return None
+    if "/" in s:
+        parts = s.split("/", 1)
+        try:
+            num, den = float(parts[0]), float(parts[1])
+            if den == 0:
+                return None
+            return num / den
+        except (TypeError, ValueError):
+            return None
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_rotation_degrees(val: Any) -> Optional[int]:
     """Normalize a tag/matrix value to 0/90/180/270 (clockwise display rotation vs coded frame)."""
     if val is None:
@@ -206,6 +228,7 @@ def ffprobe_info(input_path: str) -> dict:
     v_codec = None
     v_width = None
     v_height = None
+    v_fps: Optional[float] = None
     display_aspect_ratio: Optional[str] = None
     has_audio = False
     has_video = False
@@ -233,6 +256,9 @@ def ffprobe_info(input_path: str) -> dict:
                 dar = s.get("display_aspect_ratio")
                 if isinstance(dar, str) and dar.strip():
                     display_aspect_ratio = dar.strip()
+                v_fps = parse_fps_fraction(s.get("avg_frame_rate"))
+                if v_fps is None or v_fps <= 0:
+                    v_fps = parse_fps_fraction(s.get("r_frame_rate"))
                 video_seen = True
         if s.get("codec_type") == "audio":
             has_audio = True
@@ -259,6 +285,7 @@ def ffprobe_info(input_path: str) -> dict:
         "display_height": disp_h,
         "display_aspect_ratio": display_aspect_ratio,
         "rotation_degrees": rotation_degrees,
+        "video_fps": v_fps,
         "has_audio": has_audio,
         "has_video": has_video,
     }
