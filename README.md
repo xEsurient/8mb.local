@@ -6,6 +6,7 @@
 > This is a heavily modified fork of https://github.com/JMS1717/8mb.local
 >
 > Whilst hardware support has been kept the same, with native ARM64 and MacOS support built up, outside of this scope, it has not been tested directly with Nvidia/AMD/Intel
+>
 > Support will not be provided, as it has been purpose built to run in a Container with a native Dameon in MacOS for Hardware Accel.
 
 8mb.local is a self-hosted, fire-and-forget video compressor. Drop a file, choose a target size (e.g., 8 MB, 25 MB, 50 MB, 100 MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC** hardware encoding, Apple **VideoToolbox**, and automatic **CPU fallback**. 
