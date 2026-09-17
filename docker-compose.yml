@@ -15,7 +15,10 @@ services:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./data:/app/data
+      - ./data/redis:/var/lib/redis
       - ./.env:/app/.env  # optional custom settings
+    env_file:
+      - .env
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - NVIDIA_VISIBLE_DEVICES=all

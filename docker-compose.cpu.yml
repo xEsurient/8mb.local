@@ -15,11 +15,12 @@ services:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./data:/app/data
+      - ./data/redis:/var/lib/redis
       - ./.env:/app/.env  # optional custom settings
+    env_file:
+      - .env
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
       # Optional host daemon URL for native macOS VideoToolbox HW encoding
       - DAEMON_URL=${DAEMON_URL:-http://host.docker.internal:7998}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped

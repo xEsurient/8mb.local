@@ -27,8 +27,8 @@ RUN git clone --depth 1 --branch v2.3.0 https://gitlab.com/AOMediaCodec/SVT-AV1.
     cd /build && rm -rf SVT-AV1
 
 # Build FFmpeg with NVIDIA NVENC + CPU encoders (including SVT-AV1)
-RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
-        tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
+RUN wget -q https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz && \
+        tar xf ffmpeg-7.1.tar.xz && cd ffmpeg-7.1 && \
                 ./configure \
       --enable-nonfree --enable-gpl \
       --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
@@ -40,10 +40,10 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
     # Strip binaries to reduce size
     strip --strip-all /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
     # Clean up build artifacts
-        cd .. && rm -rf ffmpeg-6.1.1 ffmpeg-6.1.1.tar.xz nv-codec-headers /build
+        cd .. && rm -rf ffmpeg-7.1 ffmpeg-7.1.tar.xz nv-codec-headers /build
 
 # Stage 2: Build Frontend
-FROM node:20-alpine AS frontend-build
+FROM node:22-alpine AS frontend-build
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./

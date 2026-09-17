@@ -24,4 +24,17 @@ if [ -z "$WORKER_CONCURRENCY" ]; then
   log "Set WORKER_CONCURRENCY to $WORKER_CONCURRENCY based on $cores CPU cores"
 fi
 
+# Ensure volumes have correct permissions for unprivileged users
+chown -R redis:redis /var/lib/redis 2>/dev/null || true
+chown -R redis:redis /var/log/redis 2>/dev/null || true
+
+# Add appuser if not exists
+if ! id "appuser" >/dev/null 2>&1; then
+    useradd -r -M -s /bin/false appuser || true
+fi
+
+# We use chown -R carefully, as directories might have lots of files. 
+# In reality, just setting the top-level directory ownership is usually enough if it's a bind mount.
+chown appuser:appuser /app/uploads /app/outputs /app/data 2>/dev/null || true
+
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf "$@"

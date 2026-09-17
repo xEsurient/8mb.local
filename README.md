@@ -1,141 +1,110 @@
-# 8mb.local – Video Compressor
+# 8mb.local
 
-> [!CAUTION]
-> **IMPORTANT DISCLAIMER:** This software is provided "as is" without warranty of any kind.
->
-> This is a heavily modified fork of https://github.com/JMS1717/8mb.local
->
-> Whilst hardware support has been kept the same, with native ARM64 and MacOS support built up, outside of this scope, it has not been tested directly with Nvidia/AMD/Intel
->
-> Support will not be provided, as it has been purpose built to run in a Container with a native Dameon in MacOS for Hardware Accel.
+8mb.local is a privacy-first, LAN-native video compression and management service. It uses hardware-accelerated encoding (NVIDIA NVENC on Linux/Windows via CUDA, or optional macOS native daemon offloading) alongside CPU fallback encoders (SVT-AV1, x264, x265) to optimally compress high-resolution video into targeted byte sizes. 
 
-8mb.local is a self-hosted, fire-and-forget video compressor. Drop a file, choose a target size (e.g., 8 MB, 25 MB, 50 MB, 100 MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC** hardware encoding, Apple **VideoToolbox**, and automatic **CPU fallback**. 
+## Features
 
----
+- **Strict Target Sizes**: Intelligently calculates exact bitrates to hit specific byte constraints (e.g., 8.00MB for Discord, 25MB, 50MB, etc.).
+- **Hardware Acceleration**: 
+  - NVIDIA GPUs (NVENC) are fully supported via the default GPU container. 
+  - macOS Silicon (Apple VideoToolbox) is supported via an optional native background daemon (`daemon/`).
+- **CPU Fallbacks**: If hardware encoding fails or hardware is not present, it seamlessly falls back to CPU encoding using highly optimized `libsvtav1`, `libx264`, or `libx265`.
+- **LAN-Native & Privacy First**: By design, no external requests are made. All assets (fonts, JS) are self-hosted. 
+- **Durable Job Management**: Backed by Celery and Redis. Full support for batch tracking, pausing, resuming, and transactional cancellation.
 
-<details>
-<summary>✨ <b>Features</b></summary>
+## Getting Started
 
-<br>
+### Prerequisites
 
-- **NVIDIA NVENC hardware encoding** natively supported via Container Toolkit
-- **Native macOS VideoToolbox hardware encoding** via a transparent host daemon running securely via `launchd` for Apple M-series chips
-- **Two-Mode Interface**: A streamlined Simple Mode and an advanced Sidebar Mode
-- **Smart Quality Profiles** (`Fast`, `Balanced`, `Quality`, `Best`) with a **Perfect Quality Override** function
-- **Robust encoder validation** at startup — tests actual encoder initialization, not just availability
-- **AV1, HEVC (H.265), and H.264** encoding natively and via deep ARM container optimizations (`-DNATIVE=ON`), including `libsvtav1` and `libaom-av1`
-- **Ultra-lightweight Frontend**: Native CSS SvelteKit implementation yielding instantaneous Node compilation.
-- **Batch processing** — compress multiple files in a single operation
-- **Job history** and **Auto-download** workflows included
+- **Docker** and **Docker Compose**
+- *(Optional, for NVIDIA GPUs)*: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed on the host.
 
-</details>
+### Starting the Service
 
-<details>
-<summary><b>📸 Screenshots</b></summary>
-<br>
-
-| | | |
-| :---: | :---: | :---: |
-| <img src="docs/media/1.png" width="250"><br>Home | <img src="docs/media/2.png" width="250"><br>Advanced | <img src="docs/media/3.png" width="250"><br>Batch |
-| <img src="docs/media/4.png" width="250"><br>Queue | <img src="docs/media/5.png" width="250"><br>History | <img src="docs/media/6.png" width="250"><br>Settings - System Options |
-| <img src="docs/media/7.png" width="250"><br>Settings - System Options | <img src="docs/media/8.png" width="250"><br>Settings - App Management | <img src="docs/media/9.png" width="250"><br>Settings - Defaults & Options |
-| <img src="docs/media/10.png" width="250"><br>Settings - Defaults & Options | <img src="docs/media/11.png" width="250"><br>Settings - Security | <img src="docs/media/12.png" width="250"><br>API |
-
-</details>
-
-<details open>
-<summary>🚀 <b>Installation Guides</b></summary>
-
-<br>
-
-### Default (NVIDIA GPU)
-
-Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) and a working `docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi` on the host.
+By default, `docker-compose.yml` attempts to use the NVIDIA GPU and runs on port `8001`.
 
 ```bash
-docker run -d \
-  --name 8mb.local \
-  --gpus all \
-  -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
-  -p 8001:8001 \
-  -v ./data:/app/data \
-  -v ./uploads:/app/uploads \
-  -v ./outputs:/app/outputs \
-  xesurient/8mb.local:latest
+docker compose up -d
 ```
 
-### macOS Hardware Acceleration (M-Series)
+If you do not have an NVIDIA GPU, or the above fails, you can use the CPU-only configuration:
 
-Docker on macOS runs inside a Linux VM and fundamentally lacks access to Apple Silicon hardware encoders. 8mb.local ships with a native, zero-copy macOS daemon that intercepts encode requests using standard macOS `launchctl` bounds:
+```bash
+docker compose -f docker-compose.cpu.yml up -d
+```
 
-1. Bring up your stack using the CPU-only compose file:
-   `docker compose -f docker-compose.cpu.yml up -d --build`
-2. Install the native daemon on your host Mac:
+The service will be available at `http://localhost:8001` or `http://<your-lan-ip>:8001`.
+
+## Configuration & Security
+
+8mb.local prioritizes a seamless LAN experience but can be secured if exposed to broader networks. Configuration is handled via environment variables in an optional `.env` file (or directly in your `docker-compose.yml`).
+
+### No-Login Sharing (Default)
+Out of the box, `8mb.local` operates in "No-Login Sharing" mode. Anyone on the local network who can access port `8001` can upload, compress, and download videos without a password. 
+
+### Enabling Authentication
+If you wish to secure your instance (e.g., if port 8001 is exposed beyond a trusted LAN):
+
+1. Create a `.env` file in the project root.
+2. Add the following variables:
+   ```env
+   AUTH_ENABLED=true
+   AUTH_USER=admin
+   AUTH_PASS=your_secure_password
+   ```
+3. Restart the container (`docker compose down && docker compose up -d`).
+
+Once enabled, visitors will be prompted for Basic Authentication before accessing the UI or API.
+
+> **Note:** The UI Settings page cannot enable authentication from a disabled state for security reasons (to prevent a public user from locking you out). It must be enabled via the `.env` file first.
+
+### Config Precedence
+Settings applied globally in the `Settings` UI override the default application behaviors. However, environmental variables (`.env`) override UI settings for critical infrastructure limits (like `WORKER_CONCURRENCY`). 
+
+### Settings Migration (`settings.json`)
+If you are migrating from an earlier version, your existing `settings.json` will be automatically migrated on startup to support visibility toggles for new VideoToolbox codecs. Additionally, codecs that are technically unsupported by the current execution environment (or the connected daemon) are now automatically hidden in the frontend without requiring you to manually maintain explicit visibility overrides. Note that if you explicitly uncheck a codec in the Settings UI, it will remain hidden globally even if your hardware supports it.
+
+## Operations & Data
+
+### File Formats and Target Units
+- Supported input formats include nearly any video FFmpeg can read.
+- Target constraints are calculated using binary megabytes (1 MB = 1,048,576 bytes) minus a small safety margin for container muxing overhead, ensuring outputs strictly fit into services with hard file size limits.
+
+### Cancellation and Retention
+- **Cancellation**: Canceling a job from the UI will instantly send a SIGTERM to the FFmpeg subprocess, release hardware resources, and forcefully clean up partial output files.
+- **Retention**: Successfully processed files and their metadata are kept on disk according to your Retention Policy (configurable in the UI Settings). Once the retention period expires, the artifact and its Redis job history are purged.
+
+### Restart Recovery
+The system is designed to survive restarts. 
+- All video uploads, outputs, and internal databases are bound to persistent volumes in `./data`, `./uploads`, and `./outputs`.
+- Redis operates with AOF (Append-Only File) persistence enabled. Any jobs left in the queue during a container restart will automatically resume processing when the worker comes back online.
+
+### Tests
+To verify encoder and hardware availability, a suite of initialization tests is run automatically upon startup. If you wish to run backend tests manually, you can execute them within the worker directory:
+
+```bash
+docker exec -it 8mb.local bash -c "cd /app/worker && pytest tests/"
+```
+
+## Optional: macOS Daemon Offload
+
+If you are running the service on a Mac and wish to utilize Apple Silicon VideoToolbox for hardware acceleration, you can install the provided background daemon on the host. The docker container will detect the local daemon and securely offload compatible compression jobs to it.
+
+1. Ensure Homebrew is installed on your Mac.
+2. Run the daemon installer script natively on the host:
    ```bash
    cd daemon
-   bash install.sh
+   ./install.sh
    ```
-   or
-   ```bash
-   ./daemon/install.sh
+3. The installer will prompt for a port (default: `7998`) and automatically generate an API Key.
+4. Copy the generated `DAEMON_API_KEY` from the installer output.
+5. In your project `.env` file (alongside your `docker-compose.yml`), configure the connection:
+   ```env
+   DAEMON_URL=http://host.docker.internal:7998
+   DAEMON_API_KEY=your_generated_api_key_here
    ```
+6. Restart your docker containers so they pick up the API key.
+   *(Ensure you bind it to `127.0.0.1` and not a public interface for security).*
 
-The daemon runs natively on macOS. The Docker container will automatically bridge with your M-series hardware yielding huge encoding performance boosts. 
-
-**Note**: You can manually customize your VideoToolbox connection logic natively inside the `8mb.local` instance Settings UI if you choose to bind your daemon to a custom port.
-
-### CPU Only (No GPU)
-
-```bash
-docker run -d \
-  --name 8mb.local \
-  -p 8001:8001 \
-  -v ./data:/app/data \
-  -v ./uploads:/app/uploads \
-  -v ./outputs:/app/outputs \
-  xesurient/8mb.local:latest
-```
-
-Access the web UI at **http://localhost:8001**.
-If building from source, simply clone the repository and run `docker compose up -d --build`. Use `docker-compose.cpu.yml` for CPU-only nodes.
-
-</details>
-
-<details>
-<summary>💻 <b>Automation & Headless API</b></summary>
-
-<br>
-
-8mb.local maintains an entirely distinct backend logic schema parsed natively through **FastAPI**. The web UX is completely optional. 
-
-FastAPI automatically generates an interactive swagger interface to test payloads. Assuming 8mb.local is active, simply navigate your web browser to **`http://localhost:8001/docs`** to view and construct valid curl configurations.
-
-For shell-script automation and headless workflow structures, review the **[API Reference Guide](docs/API_REFERENCE.md)**.
-
-</details>
-
-<details>
-<summary>📝 <b>Credits</b></summary>
-
-<br>
-
-8mb.local utilizes elements from the broader open-source community. Special thanks to FFmpeg for the incredibly powerful encoding logic powering the backend, and to the Svelte framework for rendering the frontend footprint at a fraction of the cost of heavy JS frameworks. 
-
-UI assets and components were modeled and sourced using open design palettes, adopting clean native CSS practices for maximum speed. The initial homepage architecture is a fork and rebase of the beautiful [fits.video](https://fits.video/) project created by their open-source [GitHub team](https://github.com/fits-video), tweaked and structurally unified to cleanly serve the 8mb.local compressor workflow.
-
-</details>
-
-<details>
-<summary>📚 <b>Advanced Documentation</b></summary>
-
-<br>
-
-Need to configure something deep inside the stack? We've abstracted advanced operations out into targeted guides.
-
-- ⚙️ **[Configuration & Environment Limits](docs/CONFIGURATION.md)**
-- ⚡ **[Architecture & Concurrency Tuning](docs/ARCHITECTURE.md)**
-- 🛡️ **[Reverse Proxy SSE Routing (NGINX/Traefik)](docs/REVERSE_PROXY.md)**
-- 🖥️ **[Supported Hardware Processors](docs/GPU_SUPPORT.md)**
-- 📜 **[Internal Task Queue System](docs/QUEUE_SYSTEM.md)**
-
-</details>
+---
+*Built with FastAPI, SvelteKit, FFmpeg, and Celery.*
